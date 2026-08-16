@@ -61,5 +61,5 @@ pub fn read_open_status() -> Option<bool> {
 /// Turn the IME on or off. Idempotent.
 pub fn set_open(on: bool) -> u32 {
     let vk = if on { VK_IME_ON } else { VK_IME_OFF };
-    send(&[key_input(vk, false, false), key_input(vk, true, false)])
+    send(&[key_input(vk, false), key_input(vk, true)])
 }

@@ -142,7 +142,7 @@ fn main() {
     // particular turns every following keystroke into a hotkey.
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        inject::release_all_modifiers();
+        inject::release_stuck_keys();
         previous(info);
     }));
 
@@ -195,7 +195,7 @@ fn main() {
     }
 
     hooks.shutdown();
-    inject::release_all_modifiers();
+    inject::release_stuck_keys();
     log::line("stopped");
     log::shutdown();
 }

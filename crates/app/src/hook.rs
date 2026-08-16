@@ -24,6 +24,7 @@ use std::time::Instant;
 
 use altoggle_core::{Action, Config, Event, Machine, Side};
 
+use crate::keys::foreign_modifier_held;
 use crate::settings::Runtime;
 use crate::{ime, inject, log};
 
@@ -32,10 +33,6 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Accessibility::{
     HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent,
-};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU,
-    VK_RSHIFT, VK_RWIN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetMessageW, HC_ACTION, HHOOK,
@@ -84,48 +81,29 @@ fn now_ms() -> u64 {
 
 // ---------------------------------------------------------------- callbacks
 
-/// Was another modifier already held when the trigger went down?
-///
-/// A key pressed before the trigger has already had its down event delivered, so
-/// the state machine can never see it. `GetAsyncKeyState` is the only way to
-/// notice, and it is cheap enough for the callback (no cross-process message).
-///
-/// The trigger itself is excluded, or a Ctrl or Shift trigger would report
-/// itself as held and never fire.
-fn foreign_modifier_held(trigger_vk: u16) -> bool {
-    const MODIFIERS: [u16; 8] = [
-        VK_LCONTROL,
-        VK_RCONTROL,
-        VK_LSHIFT,
-        VK_RSHIFT,
-        VK_LMENU,
-        VK_RMENU,
-        VK_LWIN,
-        VK_RWIN,
-    ];
-    MODIFIERS.iter().any(|&vk| {
-        vk != trigger_vk && unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 }
-    })
-}
-
-/// Suppress the menu bar and switch the IME, in a single `SendInput` call.
+/// Suppress the trigger's usual side effect and switch the IME, in a single
+/// `SendInput` call.
 ///
 /// The order matters, so it has to be one call: `SendInput` guarantees the whole
 /// array is delivered without other input interleaving, while three separate
 /// calls can be cut apart by a real keystroke.
-fn fire(side: Side, trigger_vk: u16) -> u32 {
+///
+/// The IME keys go **after** the suppression, never before: injected while the
+/// trigger is still held they would read as a chord, and Win+key chords are
+/// hotkeys.
+///
+/// How many events that is depends on the trigger — a `Swallow` trigger
+/// contributes none — so the count is returned rather than assumed.
+fn fire(side: Side, trigger_vk: u16) -> (u32, u32) {
     let dummy = DUMMY_VK.load(Ordering::Relaxed) as u16;
     let ime_vk = match side {
         Side::Right => ime::VK_IME_ON,
         Side::Left => ime::VK_IME_OFF,
     };
-    inject::send(&[
-        inject::key_input(dummy, false, false),
-        inject::key_input(dummy, true, false),
-        inject::key_input(trigger_vk, true, inject::is_extended_trigger(trigger_vk)),
-        inject::key_input(ime_vk, false, false),
-        inject::key_input(ime_vk, true, false),
-    ])
+    let mut batch = inject::suppress(dummy, trigger_vk);
+    batch.push(inject::key_input(ime_vk, false));
+    batch.push(inject::key_input(ime_vk, true));
+    inject::send_batch(&batch)
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -159,18 +137,18 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 
     if let Action::Fire(side) = action {
         // Fire only follows a KeyUp of the held trigger, so `vk` is that trigger.
-        let sent = fire(side, vk);
-        if sent == 5 {
+        let (sent, expected) = fire(side, vk);
+        if sent == expected {
             log::line(format!("fire {side:?}"));
         } else {
-            // A partial injection can leave Alt held down, which would turn every
-            // following keystroke into an Alt combination.
+            // A partial injection can leave the trigger held down, which for a
+            // modifier turns every following keystroke into a chord.
             log::line(format!(
-                "fire {side:?} FAILED (SendInput={sent}/5), releasing modifiers"
+                "fire {side:?} FAILED (SendInput={sent}/{expected}), releasing modifiers"
             ));
-            inject::release_all_modifiers();
+            inject::release_stuck_keys();
         }
-        // Swallow the real Alt up. The replacement was injected above.
+        // Swallow the real up. Whatever had to replace it went out above.
         return 1;
     }
 

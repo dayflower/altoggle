@@ -16,9 +16,10 @@ use altoggle_core::Config;
 
 /// A key that can act as a trigger.
 ///
-/// Deliberately not "any key": the suppression strategy differs per key (Alt
-/// opens the menu bar, Win opens the start menu), so only keys we have a
-/// strategy for belong here.
+/// Deliberately not "any key": a solo press has to be robbed of its usual side
+/// effect, and that only works for keys whose side effect we have measured. Alt
+/// opens the menu bar and Win opens the start menu; both are suppressed by
+/// injecting a dummy key before the up, which is what makes them eligible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TriggerKey {
     LeftAlt,
@@ -27,9 +28,32 @@ pub enum TriggerKey {
     RightCtrl,
     LeftShift,
     RightShift,
+    LeftWin,
+    RightWin,
+    /// The context-menu key, `VK_APPS`.
+    ///
+    /// **Not Alt.** Win32 calls Alt `VK_MENU`, so "Menu" is ambiguous in code;
+    /// this is the key with the menu glyph on it, next to right Ctrl. It is also
+    /// the only trigger that is not a modifier, and the only one with no left or
+    /// right twin.
+    Menu,
 }
 
 impl TriggerKey {
+    /// Every trigger, in the order the config file and the settings dialog
+    /// present them.
+    pub const ALL: [TriggerKey; 9] = [
+        TriggerKey::LeftAlt,
+        TriggerKey::RightAlt,
+        TriggerKey::LeftCtrl,
+        TriggerKey::RightCtrl,
+        TriggerKey::LeftShift,
+        TriggerKey::RightShift,
+        TriggerKey::LeftWin,
+        TriggerKey::RightWin,
+        TriggerKey::Menu,
+    ];
+
     pub fn vk(self) -> u16 {
         match self {
             TriggerKey::LeftAlt => 0xA4,
@@ -38,7 +62,34 @@ impl TriggerKey {
             TriggerKey::RightCtrl => 0xA3,
             TriggerKey::LeftShift => 0xA0,
             TriggerKey::RightShift => 0xA1,
+            TriggerKey::LeftWin => 0x5B,
+            TriggerKey::RightWin => 0x5C,
+            TriggerKey::Menu => 0x5D, // VK_APPS
         }
+    }
+
+    /// The name used in the config file. Must match the serde variant name; a
+    /// test holds the two together.
+    pub fn name(self) -> &'static str {
+        match self {
+            TriggerKey::LeftAlt => "LeftAlt",
+            TriggerKey::RightAlt => "RightAlt",
+            TriggerKey::LeftCtrl => "LeftCtrl",
+            TriggerKey::RightCtrl => "RightCtrl",
+            TriggerKey::LeftShift => "LeftShift",
+            TriggerKey::RightShift => "RightShift",
+            TriggerKey::LeftWin => "LeftWin",
+            TriggerKey::RightWin => "RightWin",
+            TriggerKey::Menu => "Menu",
+        }
+    }
+
+    /// Parse a name, for the probes' command lines. Case-insensitive, because a
+    /// command line is typed in a hurry; the config file stays strict.
+    pub fn from_name(s: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|k| k.name().eq_ignore_ascii_case(s))
     }
 }
 
@@ -94,7 +145,17 @@ const TEMPLATE: &str = r#"# altoggle configuration.
 # Edit and choose "Reload config" from the tray menu to apply.
 
 # Which key turns the IME off, and which turns it on.
-# One of: LeftAlt, RightAlt, LeftCtrl, RightCtrl, LeftShift, RightShift
+# One of: LeftAlt, RightAlt, LeftCtrl, RightCtrl, LeftShift, RightShift,
+#         LeftWin, RightWin, Menu
+#
+# Whichever key you pick gives up its usual solo-press behaviour: Alt the menu
+# bar, Win the start menu, Menu the context menu. Holding the key past
+# threshold_ms below still gets you the original behaviour.
+#
+# "Menu" is the key with the menu glyph next to right Ctrl, not Alt.
+#
+# Note that many Japanese laptops and JIS keyboards have no right Win key, and
+# some have no Menu key. Mixing sides is fine, for example LeftWin and RightAlt.
 left_trigger = "LeftAlt"
 right_trigger = "RightAlt"
 
@@ -217,5 +278,71 @@ mod tests {
     #[test]
     fn an_unknown_trigger_name_is_rejected() {
         assert!(toml::from_str::<Settings>(r#"left_trigger = "Space""#).is_err());
+    }
+
+    #[test]
+    fn every_trigger_name_is_accepted_by_the_parser() {
+        // `name()` feeds the probes' command lines and the template comment,
+        // while serde reads the config file. They must agree on every variant.
+        for key in TriggerKey::ALL {
+            let text = format!("left_trigger = \"{}\"", key.name());
+            let s: Settings = toml::from_str(&text)
+                .unwrap_or_else(|e| panic!("{} is not a serde variant name: {e}", key.name()));
+            assert_eq!(s.left_trigger, key);
+            assert_eq!(TriggerKey::from_name(key.name()), Some(key));
+        }
+    }
+
+    #[test]
+    fn the_template_lists_every_trigger() {
+        // A key you cannot discover is a key nobody uses.
+        for key in TriggerKey::ALL {
+            assert!(
+                TEMPLATE.contains(key.name()),
+                "{} is missing from the config template",
+                key.name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_win_keys_are_the_ones_the_start_menu_uses() {
+        assert_eq!(TriggerKey::LeftWin.vk(), 0x5B);
+        assert_eq!(TriggerKey::RightWin.vk(), 0x5C);
+    }
+
+    #[test]
+    fn menu_is_vk_apps_and_not_alt() {
+        // Win32 names Alt `VK_MENU`, so the obvious misreading of this variant
+        // is 0x12 (or the 0xA4/0xA5 pair). It is the context-menu key.
+        assert_eq!(TriggerKey::Menu.vk(), 0x5D);
+    }
+
+    /// A trigger whose up is injected can be stranded down by a partly landed
+    /// injection, and `release_stuck_keys` is the only thing that recovers it.
+    /// A trigger whose up is withheld on purpose must **not** be in that list,
+    /// or the release itself performs the side effect we suppressed.
+    ///
+    /// Tying the two together here means adding a trigger cannot get this wrong
+    /// quietly in either direction.
+    #[test]
+    fn the_release_list_matches_how_each_trigger_is_suppressed() {
+        use crate::inject::{RELEASED_ON_FAILURE, Suppression, suppression_for};
+        for key in TriggerKey::ALL {
+            let listed = RELEASED_ON_FAILURE.contains(&key.vk());
+            match suppression_for(key.vk()) {
+                Suppression::DummyThenUp => assert!(
+                    listed,
+                    "{} has its up injected, so it can stick down and must be released",
+                    key.name()
+                ),
+                Suppression::Swallow => assert!(
+                    !listed,
+                    "{} has its up withheld on purpose; releasing it would fire the \
+                     very side effect the swallow prevents",
+                    key.name()
+                ),
+            }
+        }
     }
 }

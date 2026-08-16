@@ -1,23 +1,29 @@
 //! altprobe — checks whether plan option A ("inject a dummy key") actually works.
 //!
-//! Does not touch the IME yet. It only answers one question: **does a solo Alt
-//! press stop opening the menu bar?** If that fails, the whole design falls back
-//! to option B (intercepting Alt down entirely), which makes this the first
-//! thing to verify.
+//! Does not touch the IME. It answers one question per trigger key: **does a solo
+//! press stop having its usual side effect?** For Alt that side effect is the
+//! menu bar; for Win it is the start menu. If suppression fails, the design falls
+//! back to option B (intercepting the key down entirely), which makes this the
+//! first thing to verify for any newly added trigger.
 //!
 //! What it does:
-//! - Passes Alt down through to the OS untouched (Alt+X behaves exactly as before)
-//! - On detecting a solo Alt up, **blocks** that up and injects
-//!   `[dummy down, dummy up, ALT up]` in **one SendInput call**
+//! - Passes the trigger's down through to the OS untouched, so Alt+X and Win+E
+//!   behave exactly as before
+//! - On detecting a solo up, **blocks** that up and injects the suppression plus
+//!   a replacement up in **one SendInput call**
 //!
 //! Because this is a dangerous thing to run, there are three escape hatches:
-//! - Exits automatically after 90s by default (first argument overrides)
+//! - Exits automatically after 90s by default (`--secs` overrides)
 //! - Ctrl+C goes through the normal shutdown path
 //! - Normal exit and panic both inject an up for every modifier before finishing
 //!
+//! `--dry-run` prints what would be used and installs no hook. Use it to confirm
+//! you are running the build you think you are before arming anything.
+//!
 //! Usage:
-//!   altprobe [seconds] [dummy VK in hex]
-//!   e.g. altprobe 120 7C   -> 120 seconds, using VK_F13 as the dummy
+//!   altprobe [--secs=N] [--dummy=HEX] [--left=KEY] [--right=KEY] [--threshold=MS]
+//!            [--dry-run]
+//!   e.g. altprobe --left=LeftWin --right=RightWin
 
 use std::cell::RefCell;
 use std::io::{BufWriter, Write};
@@ -27,16 +33,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::time::Instant;
 
+use altoggle_app::keys::foreign_modifier_held;
+use altoggle_app::probe_args::{self, ProbeArgs};
 use altoggle_app::inject;
-use altoggle_core::{Action, Config, Event, Machine, Side, VK_LMENU, VK_RMENU};
+use altoggle_core::{Action, Config, Event, Machine};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_RWIN, VK_SHIFT,
-};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_UP, MSG,
     PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
@@ -77,13 +82,6 @@ fn log(s: String) {
 
 // ---------------------------------------------------------------- hooks
 
-/// Was another modifier already held when the trigger was pressed? Alt itself
-/// does not count.
-fn foreign_modifier_held() -> bool {
-    let down = |vk: u16| unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 };
-    down(VK_CONTROL) || down(VK_SHIFT) || down(VK_LWIN) || down(VK_RWIN)
-}
-
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code != HC_ACTION as i32 {
         return unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) };
@@ -105,7 +103,8 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             m.on_event(Event::KeyUp(vk), t)
         } else {
             let a = m.on_event(Event::KeyDown(vk), t);
-            if (vk == VK_LMENU || vk == VK_RMENU) && foreign_modifier_held() {
+            let cfg = *m.config();
+            if (vk == cfg.left_trigger || vk == cfg.right_trigger) && foreign_modifier_held(vk) {
                 m.on_event(Event::ForeignKeyHeld, t);
                 contaminated_by_prior = true;
             }
@@ -120,29 +119,34 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     }
 
     if let Action::Fire(side) = action {
-        let alt_vk = match side {
-            Side::Left => VK_LMENU,
-            Side::Right => VK_RMENU,
+        // Fire only follows a KeyUp of the held trigger, so `vk` is that trigger.
+        let dummy = DUMMY_VK.load(Ordering::Relaxed) as u16;
+        let batch = inject::suppress(dummy, vk);
+        let (sent, expected) = inject::send_batch(&batch);
+        let what = match inject::suppression_for(vk) {
+            inject::Suppression::DummyThenUp => format!(
+                "injected [0x{dummy:02X} down, 0x{dummy:02X} up, 0x{vk:02X} up] \
+                 (SendInput={sent}/{expected})"
+            ),
+            // Nothing goes out: the up is the side effect, so replaying it would
+            // perform exactly what the suppression is for.
+            inject::Suppression::Swallow => "injected nothing (swallowed)".to_string(),
         };
-        let sent = inject::dummy_then_trigger_up(DUMMY_VK.load(Ordering::Relaxed) as u16, alt_vk);
         log(format!(
-            "{:>8.3}  *** FIRE {:?}  blocked the real up -> injected [0x{:02X} down, 0x{:02X} up, 0x{:02X} up] (SendInput={}/3)",
+            "{:>8.3}  *** FIRE {side:?}  blocked the real up -> {what}",
             t as f64 / 1000.0,
-            side,
-            DUMMY_VK.load(Ordering::Relaxed),
-            DUMMY_VK.load(Ordering::Relaxed),
-            alt_vk,
-            sent,
         ));
-        if sent != 3 {
-            // A failed injection leaves Alt held down. Release it defensively.
+        if sent != expected {
+            // A failed injection leaves the trigger held down. Release it
+            // defensively: a stuck Win key turns every later keystroke into a
+            // hotkey.
             log(format!(
                 "{:>8.3}  !!! injection failed, releasing modifiers",
                 t as f64 / 1000.0
             ));
-            inject::release_all_modifiers();
+            inject::release_stuck_keys();
         }
-        return 1; // block the real Alt up
+        return 1; // block the real up
     }
 
     unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
@@ -170,14 +174,16 @@ unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
 // ---------------------------------------------------------------- main
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let auto_exit_secs: u64 = args.next().and_then(|a| a.parse().ok()).unwrap_or(90);
-    if let Some(d) = args.next()
-        && let Ok(v) = u32::from_str_radix(d.trim_start_matches("0x"), 16)
-    {
-        DUMMY_VK.store(v, Ordering::Relaxed);
-    }
-    let dummy = DUMMY_VK.load(Ordering::Relaxed);
+    let args = match ProbeArgs::parse(90) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("altprobe: {e}\n{}", probe_args::usage("altprobe"));
+            std::process::exit(2);
+        }
+    };
+    let auto_exit_secs = args.secs;
+    DUMMY_VK.store(args.dummy_vk as u32, Ordering::Relaxed);
+    MACHINE.with_borrow_mut(|m| m.set_config(args.config()));
 
     START.set(Instant::now()).ok();
     MAIN_TID.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
@@ -185,7 +191,7 @@ fn main() {
     // Do not let a panic leave keys stuck down.
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        inject::release_all_modifiers();
+        inject::release_stuck_keys();
         prev(info);
     }));
 
@@ -207,12 +213,14 @@ fn main() {
     });
 
     println!("altprobe - verifying option A (dummy key injection)");
-    println!(
-        "dummy key: 0x{dummy:02X}   threshold: {}ms",
-        Config::default().threshold_ms
-    );
-    println!("Press Alt alone and watch whether the menu bar opens in each app.");
-    println!("The IME is not switched yet. Alt+X and friends should be unchanged.");
+    println!("{}", args.describe());
+    if args.dry_run {
+        println!("--dry-run: no hook installed, nothing intercepted.");
+        return;
+    }
+    println!("Press a trigger alone and watch whether its usual side effect happens");
+    println!("(Alt: the menu bar. Win: the start menu). Check every app that matters.");
+    println!("The IME is not switched yet. Chords such as Alt+X and Win+E must be unchanged.");
     println!(
         "Quit: Ctrl+C / automatic exit after {auto_exit_secs}s / last resort is killing the process from Ctrl+Alt+Del"
     );
@@ -248,7 +256,7 @@ fn main() {
         UnhookWindowsHookEx(kb_hook);
         UnhookWindowsHookEx(ms_hook);
     }
-    inject::release_all_modifiers();
+    inject::release_stuck_keys();
     if let Some(tx) = TX.get() {
         let _ = tx.send(Msg::Stop);
     }

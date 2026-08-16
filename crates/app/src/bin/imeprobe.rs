@@ -3,8 +3,8 @@
 //! Option A's suppression, as confirmed by `altprobe`, plus the IME operation.
 //! This is essentially the app itself, minus the tray icon and the config file.
 //!
-//! - Solo press of right Alt -> `VK_IME_ON`
-//! - Solo press of left Alt  -> `VK_IME_OFF`
+//! - Solo press of the right trigger -> `VK_IME_ON`
+//! - Solo press of the left trigger  -> `VK_IME_OFF`
 //!
 //! There is no layout check. Injecting the IME keys under en-US was measured to
 //! do nothing, so "do nothing when no Japanese IME is active" holds without one.
@@ -15,9 +15,11 @@
 //! type Japanese).
 //!
 //! Usage:
-//!   imeprobe [seconds] [dummy VK in hex] [split]
-//!   split: send the suppression and the IME keys as two separate SendInput
-//!          calls (the default batches them into one)
+//!   imeprobe [--secs=N] [--dummy=HEX] [--left=KEY] [--right=KEY] [--threshold=MS]
+//!            [--split] [--dry-run]
+//!   --split:   send the suppression and the IME keys as two separate SendInput
+//!              calls (the default batches them into one)
+//!   --dry-run: print what would be used and install no hook
 
 use std::cell::RefCell;
 use std::io::{BufWriter, Write};
@@ -29,15 +31,14 @@ use std::time::{Duration, Instant};
 
 use altoggle_app::ime;
 use altoggle_app::inject::{self, key_input};
-use altoggle_core::{Action, Config, Event, Machine, Side, VK_LMENU, VK_RMENU};
+use altoggle_app::keys::foreign_modifier_held;
+use altoggle_app::probe_args::{self, ProbeArgs};
+use altoggle_core::{Action, Config, Event, Machine, Side};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_RWIN, VK_SHIFT,
-};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_UP, MSG,
     PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
@@ -81,37 +82,28 @@ fn log(s: String) {
     }
 }
 
-fn foreign_modifier_held() -> bool {
-    let down = |vk: u16| unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 };
-    down(VK_CONTROL) || down(VK_SHIFT) || down(VK_LWIN) || down(VK_RWIN)
-}
-
 /// Injection on fire. Returns (events sent, events expected).
-fn fire(side: Side) -> (u32, u32) {
-    let trigger_vk = match side {
-        Side::Left => VK_LMENU,
-        Side::Right => VK_RMENU,
-    };
+fn fire(side: Side, trigger_vk: u16) -> (u32, u32) {
     let dummy = DUMMY_VK.load(Ordering::Relaxed) as u16;
     let ime_vk = match side {
         Side::Right => ime::VK_IME_ON,
         Side::Left => ime::VK_IME_OFF,
     };
 
+    let suppression = inject::suppress(dummy, trigger_vk);
     if SPLIT.load(Ordering::Relaxed) {
-        let a = inject::dummy_then_trigger_up(dummy, trigger_vk);
+        let (a, expected) = inject::send_batch(&suppression);
         let b = ime::set_open(matches!(side, Side::Right));
-        (a + b, 5)
+        (a + b, expected + 2)
     } else {
         // The order carries meaning, so batch it into a single SendInput call.
-        let sent = inject::send(&[
-            key_input(dummy, false, false),
-            key_input(dummy, true, false),
-            key_input(trigger_vk, true, inject::is_extended_trigger(trigger_vk)),
-            key_input(ime_vk, false, false),
-            key_input(ime_vk, true, false),
-        ]);
-        (sent, 5)
+        // The IME keys come after the suppression, never before: while the
+        // trigger is still held they would read as a chord, and Win+key is a
+        // hotkey.
+        let mut batch = suppression;
+        batch.push(key_input(ime_vk, false));
+        batch.push(key_input(ime_vk, true));
+        inject::send_batch(&batch)
     }
 }
 
@@ -133,7 +125,8 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             m.on_event(Event::KeyUp(vk), t)
         } else {
             let a = m.on_event(Event::KeyDown(vk), t);
-            if (vk == VK_LMENU || vk == VK_RMENU) && foreign_modifier_held() {
+            let cfg = *m.config();
+            if (vk == cfg.left_trigger || vk == cfg.right_trigger) && foreign_modifier_held(vk) {
                 m.on_event(Event::ForeignKeyHeld, t);
             }
             a
@@ -141,7 +134,8 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     });
 
     if let Action::Fire(side) = action {
-        let (sent, expected) = fire(side);
+        // Fire only follows a KeyUp of the held trigger, so `vk` is that trigger.
+        let (sent, expected) = fire(side, vk);
         if let Some(tx) = TX.get() {
             let _ = tx.send(Msg::Fired {
                 at: t as f64 / 1000.0,
@@ -151,10 +145,10 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             });
         }
         if sent != expected {
-            inject::release_all_modifiers();
+            inject::release_stuck_keys();
             log("!!! injection failed, modifiers released".into());
         }
-        return 1; // block the real Alt up
+        return 1; // block the real up
     }
 
     unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
@@ -178,38 +172,42 @@ unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let auto_exit_secs: u64 = args.next().and_then(|a| a.parse().ok()).unwrap_or(120);
-    if let Some(d) = args.next()
-        && let Ok(v) = u32::from_str_radix(d.trim_start_matches("0x"), 16)
-    {
-        DUMMY_VK.store(v, Ordering::Relaxed);
-    }
-    if args.any(|a| a == "split") {
-        SPLIT.store(true, Ordering::Relaxed);
-    }
+    let args = match ProbeArgs::parse(120) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("imeprobe: {e}\n{}", probe_args::usage("imeprobe"));
+            std::process::exit(2);
+        }
+    };
+    let auto_exit_secs = args.secs;
+    DUMMY_VK.store(args.dummy_vk as u32, Ordering::Relaxed);
+    SPLIT.store(args.split, Ordering::Relaxed);
+    MACHINE.with_borrow_mut(|m| m.set_config(args.config()));
 
     START.set(Instant::now()).ok();
     MAIN_TID.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
 
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        inject::release_all_modifiers();
+        inject::release_stuck_keys();
         prev(info);
     }));
 
     println!("imeprobe - verifying IME switching");
+    println!("{}", args.describe());
     println!(
-        "dummy key: 0x{:02X}   injection: {}   threshold: {}ms",
-        DUMMY_VK.load(Ordering::Relaxed),
-        if SPLIT.load(Ordering::Relaxed) {
-            "split"
-        } else {
-            "batch"
-        },
-        Config::default().threshold_ms
+        "injection: {}",
+        if args.split { "split" } else { "batch" }
     );
-    println!("Solo right Alt -> IME ON   /   solo left Alt -> IME OFF");
+    if args.dry_run {
+        println!("--dry-run: no hook installed, nothing intercepted.");
+        return;
+    }
+    println!(
+        "Solo {} -> IME ON   /   solo {} -> IME OFF",
+        args.right.name(),
+        args.left.name()
+    );
     println!("No layout check (the IME keys do nothing under en-US anyway).");
     println!(
         "Quit: Ctrl+C / automatic exit after {auto_exit_secs}s / last resort is killing the process from Ctrl+Alt+Del"
@@ -284,7 +282,7 @@ fn main() {
         UnhookWindowsHookEx(kb_hook);
         UnhookWindowsHookEx(ms_hook);
     }
-    inject::release_all_modifiers();
+    inject::release_stuck_keys();
     if let Some(tx) = TX.get() {
         let _ = tx.send(Msg::Stop);
     }
