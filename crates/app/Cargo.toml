@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "altoggle"
+path = "src/main.rs"
+
 [dependencies]
 altoggle-core = { version = "0.1.0", path = "../core" }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_Input_Ime"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_Input_Ime", "Win32_UI_Accessibility", "Win32_System_RemoteDesktop", "Win32_Security", "Win32_Graphics_Gdi"] }
