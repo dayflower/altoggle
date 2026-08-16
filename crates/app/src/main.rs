@@ -5,7 +5,8 @@
 //! - Alt with anything else  -> ordinary Alt, untouched
 //!
 //! Threads:
-//! - main: a message-only window watching session changes, plus the main loop
+//! - main: the tray icon, a message-only window watching session changes, and
+//!   the message loop that drives both
 //! - `altoggle-hooks`: every low-level hook and the state machine
 //! - `altoggle-log`: the only thread allowed to block on I/O
 //!
@@ -17,10 +18,13 @@
 // Release builds therefore log through OutputDebugStringW only (see `log`).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use altoggle_app::{hook, inject, log, session, single_instance};
-use altoggle_core::Config;
+use altoggle_app::settings::Loaded;
+use altoggle_app::tray::{Command, Tray};
+use altoggle_app::{hook, inject, log, session, settings, single_instance, wide};
 
 use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 /// One instance per logged-on session.
 const INSTANCE_NAME: &str = "altoggle-single-instance";
@@ -51,6 +55,47 @@ unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
     1
 }
 
+/// Load the config, reporting what happened. Never fails: bad settings must not
+/// cost the user the ability to type.
+fn load_settings() -> settings::Settings {
+    let loaded = settings::load();
+    match &loaded {
+        Loaded::Existing(_) => log::line("config loaded"),
+        Loaded::Created(_) => log::line(format!(
+            "wrote a default config to {}",
+            settings::config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        )),
+        Loaded::Failed(_, why) => log::line(format!("using defaults: {why}")),
+    }
+    loaded.settings()
+}
+
+/// Hand the config file to whatever the user has associated with .toml.
+fn open_config_file() {
+    let Some(path) = settings::config_path() else {
+        log::line("cannot open the config file: APPDATA is not set");
+        return;
+    };
+    let verb = wide("open");
+    let target = wide(&path.display().to_string());
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW reports failure as a value of 32 or less.
+    if result as usize <= 32 {
+        log::line(format!("could not open {}", path.display()));
+    }
+}
+
 fn main() {
     log::init();
 
@@ -66,19 +111,28 @@ fn main() {
         previous(info);
     }));
 
-    let hooks = match hook::spawn(Config::default()) {
+    let settings = load_settings();
+    let hooks = match hook::spawn(settings.runtime()) {
         Ok(h) => h,
         Err(e) => fail(&format!("could not install the hooks: {e}")),
+    };
+
+    // Without a tray icon there would be no way to quit a release build, which
+    // has no console and so no Ctrl+C.
+    let tray = match Tray::new("altoggle") {
+        Ok(t) => t,
+        Err(e) => {
+            hooks.shutdown();
+            fail(&format!("could not create the tray icon: {e}"));
+        }
     };
 
     unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), 1) };
 
     log::line("started");
-    log::line("  right Alt (solo) -> IME on");
-    log::line("  left Alt  (solo) -> IME off");
     log::line(format!(
-        "  hold either past {}ms -> ordinary Alt",
-        Config::default().threshold_ms
+        "  {:?} (solo) -> IME off, {:?} (solo) -> IME on, hold past {}ms -> ordinary key",
+        settings.left_trigger, settings.right_trigger, settings.threshold_ms
     ));
 
     if let Some(secs) = exit_after_secs() {
@@ -89,7 +143,17 @@ fn main() {
         });
     }
 
-    if let Err(e) = session::run() {
+    let result = session::run(|| {
+        for command in tray.poll() {
+            match command {
+                Command::OpenConfig => open_config_file(),
+                Command::ReloadConfig => hooks.set_config(load_settings().runtime()),
+                Command::ReinstallHooks => hook::request_reinstall(),
+                Command::Quit => session::request_quit(),
+            }
+        }
+    });
+    if let Err(e) = result {
         log::line(format!("the session watcher failed: {e}"));
     }
 

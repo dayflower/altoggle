@@ -5,7 +5,9 @@ pub mod ime;
 pub mod inject;
 pub mod log;
 pub mod session;
+pub mod settings;
 pub mod single_instance;
+pub mod tray;
 
 /// Convert to the NUL-terminated UTF-16 the wide Win32 entry points expect.
 pub fn wide(s: &str) -> Vec<u16> {

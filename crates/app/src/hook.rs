@@ -22,8 +22,9 @@ use std::sync::mpsc::channel;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use altoggle_core::{Action, Config, Event, Machine, Side, VK_LMENU, VK_RMENU};
+use altoggle_core::{Action, Config, Event, Machine, Side};
 
+use crate::settings::Runtime;
 use crate::{ime, inject, log};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -33,7 +34,8 @@ use windows_sys::Win32::UI::Accessibility::{
     HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_RWIN, VK_SHIFT,
+    GetAsyncKeyState, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU,
+    VK_RSHIFT, VK_RWIN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetMessageW, HC_ACTION, HHOOK,
@@ -42,23 +44,22 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_QUIT, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
 };
 
-/// Replace the state machine's configuration.
+/// Replace the running configuration.
 ///
-/// `wParam` is a `Box<Config>` leaked with `Box::into_raw`; the loop takes
+/// `wParam` is a `Box<Runtime>` leaked with `Box::into_raw`; the loop takes
 /// ownership back. Posting is the only supported way in, because
 /// `Machine::set_config` must not run inside the hook callback.
 const WM_APP_SET_CONFIG: u32 = WM_APP + 1;
 /// Tear the hooks down and install them again.
 const WM_APP_REINSTALL: u32 = WM_APP + 2;
 
-/// The key injected to make a solo Alt press stop looking solo.
-///
-/// `0x07` is an undefined virtual key. It was harmless in every application
-/// tested. This becomes a setting once the config file exists.
-const DUMMY_VK: u16 = 0x07;
-
 static HOOK_TID: AtomicU32 = AtomicU32::new(0);
 static START: OnceLock<Instant> = OnceLock::new();
+/// The key injected to make a solo press stop looking solo.
+///
+/// Atomic rather than thread-local: the callback reads it, and it is a plain
+/// value with no invariant tying it to the state machine.
+static DUMMY_VK: AtomicU32 = AtomicU32::new(0x07);
 
 thread_local! {
     /// A low-level hook callback runs on the thread that installed the hook, and
@@ -83,15 +84,28 @@ fn now_ms() -> u64 {
 
 // ---------------------------------------------------------------- callbacks
 
-/// Was another modifier already held when the trigger went down? Alt itself does
-/// not count.
+/// Was another modifier already held when the trigger went down?
 ///
-/// A key pressed before Alt has already had its down event delivered, so the
-/// state machine can never see it. `GetAsyncKeyState` is the only way to notice,
-/// and it is cheap enough for the callback (no cross-process message).
-fn foreign_modifier_held() -> bool {
-    let down = |vk: u16| unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 };
-    down(VK_CONTROL) || down(VK_SHIFT) || down(VK_LWIN) || down(VK_RWIN)
+/// A key pressed before the trigger has already had its down event delivered, so
+/// the state machine can never see it. `GetAsyncKeyState` is the only way to
+/// notice, and it is cheap enough for the callback (no cross-process message).
+///
+/// The trigger itself is excluded, or a Ctrl or Shift trigger would report
+/// itself as held and never fire.
+fn foreign_modifier_held(trigger_vk: u16) -> bool {
+    const MODIFIERS: [u16; 8] = [
+        VK_LCONTROL,
+        VK_RCONTROL,
+        VK_LSHIFT,
+        VK_RSHIFT,
+        VK_LMENU,
+        VK_RMENU,
+        VK_LWIN,
+        VK_RWIN,
+    ];
+    MODIFIERS.iter().any(|&vk| {
+        vk != trigger_vk && unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 }
+    })
 }
 
 /// Suppress the menu bar and switch the IME, in a single `SendInput` call.
@@ -99,18 +113,15 @@ fn foreign_modifier_held() -> bool {
 /// The order matters, so it has to be one call: `SendInput` guarantees the whole
 /// array is delivered without other input interleaving, while three separate
 /// calls can be cut apart by a real keystroke.
-fn fire(side: Side) -> u32 {
-    let trigger_vk = match side {
-        Side::Left => VK_LMENU,
-        Side::Right => VK_RMENU,
-    };
+fn fire(side: Side, trigger_vk: u16) -> u32 {
+    let dummy = DUMMY_VK.load(Ordering::Relaxed) as u16;
     let ime_vk = match side {
         Side::Right => ime::VK_IME_ON,
         Side::Left => ime::VK_IME_OFF,
     };
     inject::send(&[
-        inject::key_input(DUMMY_VK, false, false),
-        inject::key_input(DUMMY_VK, true, false),
+        inject::key_input(dummy, false, false),
+        inject::key_input(dummy, true, false),
         inject::key_input(trigger_vk, true, inject::is_extended_trigger(trigger_vk)),
         inject::key_input(ime_vk, false, false),
         inject::key_input(ime_vk, true, false),
@@ -138,7 +149,8 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             m.on_event(Event::KeyUp(vk), t)
         } else {
             let a = m.on_event(Event::KeyDown(vk), t);
-            if (vk == VK_LMENU || vk == VK_RMENU) && foreign_modifier_held() {
+            let cfg = *m.config();
+            if (vk == cfg.left_trigger || vk == cfg.right_trigger) && foreign_modifier_held(vk) {
                 m.on_event(Event::ForeignKeyHeld, t);
             }
             a
@@ -146,7 +158,8 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     });
 
     if let Action::Fire(side) = action {
-        let sent = fire(side);
+        // Fire only follows a KeyUp of the held trigger, so `vk` is that trigger.
+        let sent = fire(side, vk);
         if sent == 5 {
             log::line(format!("fire {side:?}"));
         } else {
@@ -270,15 +283,21 @@ pub struct HookThread {
     join: Option<JoinHandle<()>>,
 }
 
+/// Apply a runtime config. Only ever called from the hook thread.
+fn apply(rt: Runtime) {
+    DUMMY_VK.store(rt.dummy_vk as u32, Ordering::Relaxed);
+    MACHINE.with_borrow_mut(|m| m.set_config(rt.core));
+}
+
 /// Start the hook thread and wait until the hooks are actually installed.
-pub fn spawn(cfg: Config) -> Result<HookThread, String> {
+pub fn spawn(rt: Runtime) -> Result<HookThread, String> {
     START.get_or_init(Instant::now);
     let (ready_tx, ready_rx) = channel::<Result<u32, String>>();
 
     let join = std::thread::Builder::new()
         .name("altoggle-hooks".into())
         .spawn(move || {
-            MACHINE.with_borrow_mut(|m| m.set_config(cfg));
+            apply(rt);
 
             let installed = install();
             let ok = installed.is_some();
@@ -298,10 +317,16 @@ pub fn spawn(cfg: Config) -> Result<HookThread, String> {
             while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
                 match msg.message {
                     WM_APP_SET_CONFIG => {
-                        // Take back ownership of the Config the sender leaked.
-                        let cfg = unsafe { *Box::from_raw(msg.wParam as *mut Config) };
-                        MACHINE.with_borrow_mut(|m| m.set_config(cfg));
-                        log::line("config applied");
+                        // Take back ownership of the Runtime the sender leaked.
+                        let rt = unsafe { *Box::from_raw(msg.wParam as *mut Runtime) };
+                        apply(rt);
+                        log::line(format!(
+                            "config applied: triggers 0x{:02X}/0x{:02X}, {}ms, dummy 0x{:02X}",
+                            rt.core.left_trigger,
+                            rt.core.right_trigger,
+                            rt.core.threshold_ms,
+                            rt.dummy_vk
+                        ));
                     }
                     WM_APP_REINSTALL => reinstall(),
                     _ => unsafe {
@@ -345,10 +370,10 @@ pub fn request_reinstall() {
 impl HookThread {
     /// Apply a new configuration. Safe to call from any thread.
     ///
-    /// The `Config` is leaked into the message and reclaimed by the loop. If the
+    /// The `Runtime` is leaked into the message and reclaimed by the loop. If the
     /// post fails the thread is already gone, so reclaim it here instead.
-    pub fn set_config(&self, cfg: Config) {
-        let boxed = Box::into_raw(Box::new(cfg));
+    pub fn set_config(&self, rt: Runtime) {
+        let boxed = Box::into_raw(Box::new(rt));
         if !post(WM_APP_SET_CONFIG, boxed as WPARAM) {
             drop(unsafe { Box::from_raw(boxed) });
         }

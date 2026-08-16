@@ -82,7 +82,11 @@ unsafe extern "system" fn wnd_proc(
 
 /// Create the message-only window, subscribe to session notifications, and pump
 /// messages until `WM_QUIT`.
-pub fn run() -> Result<(), String> {
+///
+/// `after_message` runs after each dispatch. Tray menu clicks arrive as window
+/// messages and are turned into channel events by muda, so draining that channel
+/// here is what makes the menu responsive without a polling timer.
+pub fn run(mut after_message: impl FnMut()) -> Result<(), String> {
     MAIN_TID.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
 
     let class_name = wide("altoggle-session-watcher");
@@ -128,6 +132,7 @@ pub fn run() -> Result<(), String> {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        after_message();
     }
 
     unsafe {
