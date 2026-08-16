@@ -8,7 +8,7 @@
 //! Swapping in a dialog replaces this menu item and nothing else, because the
 //! values reach the state machine through `HookThread::set_config` either way.
 
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// What the user picked.
@@ -17,6 +17,7 @@ pub enum Command {
     OpenConfig,
     ReloadConfig,
     ReinstallHooks,
+    ToggleAutostart,
     Quit,
 }
 
@@ -26,14 +27,18 @@ pub struct Tray {
     open_config: MenuId,
     reload_config: MenuId,
     reinstall_hooks: MenuId,
+    /// Kept whole, not just its id: its checked state has to be readable and
+    /// correctable when the registry write fails.
+    autostart: CheckMenuItem,
     quit: MenuId,
 }
 
 impl Tray {
-    pub fn new(tooltip: &str) -> Result<Self, String> {
+    pub fn new(tooltip: &str, autostart_on: bool) -> Result<Self, String> {
         let open_config = MenuItem::new("Open config file", true, None);
         let reload_config = MenuItem::new("Reload config", true, None);
         let reinstall_hooks = MenuItem::new("Reinstall hooks", true, None);
+        let autostart = CheckMenuItem::new("Start with Windows", true, autostart_on, None);
         let quit = MenuItem::new("Quit", true, None);
 
         let menu = Menu::new();
@@ -41,6 +46,7 @@ impl Tray {
             &open_config,
             &reload_config,
             &PredefinedMenuItem::separator(),
+            &autostart,
             &reinstall_hooks,
             &PredefinedMenuItem::separator(),
             &quit,
@@ -59,8 +65,22 @@ impl Tray {
             open_config: open_config.id().clone(),
             reload_config: reload_config.id().clone(),
             reinstall_hooks: reinstall_hooks.id().clone(),
+            autostart,
             quit: quit.id().clone(),
         })
+    }
+
+    /// Whether the autostart item is currently ticked.
+    ///
+    /// muda flips the tick itself when the item is clicked, so this reports what
+    /// the user just asked for.
+    pub fn autostart_checked(&self) -> bool {
+        self.autostart.is_checked()
+    }
+
+    /// Force the tick back, for when acting on the click failed.
+    pub fn set_autostart_checked(&self, checked: bool) {
+        self.autostart.set_checked(checked);
     }
 
     /// Drain pending menu clicks. Call after dispatching messages.
@@ -74,6 +94,8 @@ impl Tray {
                 Command::ReloadConfig
             } else if *id == self.reinstall_hooks {
                 Command::ReinstallHooks
+            } else if *id == *self.autostart.id() {
+                Command::ToggleAutostart
             } else if *id == self.quit {
                 Command::Quit
             } else {

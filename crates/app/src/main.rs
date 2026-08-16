@@ -20,7 +20,7 @@
 
 use altoggle_app::settings::Loaded;
 use altoggle_app::tray::{Command, Tray};
-use altoggle_app::{hook, inject, log, session, settings, single_instance, wide};
+use altoggle_app::{autostart, hook, inject, log, session, settings, single_instance, wide};
 
 use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -96,6 +96,41 @@ fn open_config_file() {
     }
 }
 
+/// Warn when autostart points at a different executable than the running one.
+///
+/// The tick would otherwise claim "starts with Windows" while silently launching
+/// some other build, which is exactly the kind of thing you discover months later.
+fn report_stale_autostart() {
+    let (Some(registered), Ok(current)) =
+        (autostart::registered_command(), autostart::command_for_this_exe())
+    else {
+        return;
+    };
+    if registered != current {
+        log::line(format!(
+            "autostart points at {registered}, not this executable ({current}); \
+             toggle it off and on to repoint it"
+        ));
+    }
+}
+
+/// Act on the autostart tick the user just flipped, undoing it if the registry
+/// write fails so the menu cannot claim something untrue.
+fn toggle_autostart(tray: &Tray) {
+    let wanted = tray.autostart_checked();
+    match autostart::set_enabled(wanted) {
+        Ok(()) => log::line(if wanted {
+            "autostart enabled"
+        } else {
+            "autostart disabled"
+        }),
+        Err(e) => {
+            log::line(format!("could not change autostart: {e}"));
+            tray.set_autostart_checked(!wanted);
+        }
+    }
+}
+
 fn main() {
     log::init();
 
@@ -119,13 +154,14 @@ fn main() {
 
     // Without a tray icon there would be no way to quit a release build, which
     // has no console and so no Ctrl+C.
-    let tray = match Tray::new("altoggle") {
+    let tray = match Tray::new("altoggle", autostart::is_enabled()) {
         Ok(t) => t,
         Err(e) => {
             hooks.shutdown();
             fail(&format!("could not create the tray icon: {e}"));
         }
     };
+    report_stale_autostart();
 
     unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), 1) };
 
@@ -149,6 +185,7 @@ fn main() {
                 Command::OpenConfig => open_config_file(),
                 Command::ReloadConfig => hooks.set_config(load_settings().runtime()),
                 Command::ReinstallHooks => hook::request_reinstall(),
+                Command::ToggleAutostart => toggle_autostart(&tray),
                 Command::Quit => session::request_quit(),
             }
         }
