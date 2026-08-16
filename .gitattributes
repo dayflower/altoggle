@@ -1,0 +1,14 @@
+# Store every text file with LF, and check it out with LF.
+# The explicit eol=lf overrides a contributor's core.autocrlf setting, so the
+# working tree stays LF even on Windows where autocrlf defaults to true.
+* text=auto eol=lf
+
+# Batch files are the one place CRLF actually matters: the command interpreter
+# can mis-parse labels and goto targets when lines end with a bare LF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Assets that must never be line-ending converted or diffed as text.
+*.ico binary
+*.png binary
+*.icns binary
