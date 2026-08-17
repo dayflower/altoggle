@@ -93,18 +93,60 @@ user may be typing Japanese with it right now.
 ## Commands
 
 ```bash
-cargo test                    # 20 tests in core, 5 in settings
+cargo test                    # 43 tests: 20 in core, 18 in settings, the rest in app
 cargo clippy --all-targets    # expected to be clean
 cargo build --release         # the only build that reflects the real deployment
 ```
+
+`cargo fmt` is **not** clean on this tree and running it would rewrite files
+nobody touched. Format new files individually with `rustfmt` instead.
 
 `cargo` may be missing from an already-open shell's PATH even though the
 persisted user PATH is correct: the shell predates the rustup install. Prepend
 `$env:USERPROFILE\.cargo\bin` or open a new terminal.
 
-Config file: `%APPDATA%\altoggle\config.toml`, written with comments on first
-run. Trigger keys are named (`"LeftAlt"`), not numeric, because the eventual
-settings dialog wants exactly that list for a dropdown.
+Config file: `%APPDATA%\altoggle\config.toml`. **Regenerated whole** by
+`settings::render` every time the dialog saves, so the comments survive (they
+live in the code) and anything the user added to the file does not. Hand edits
+still work but only take effect at the next start; there is no reload command.
+Trigger keys are named (`"LeftAlt"`), not numeric, because the dialog wants
+exactly that list for a dropdown.
+
+## The settings dialog
+
+`crates/app/src/dialog.rs`, raw Win32, no dialog template and no GUI crate.
+Modeless and pumped by the main loop, so the hooks stay live while it is open —
+that is the point: change the threshold, press Apply, press the key, feel
+whether it is right. Modal would have needed a nested loop, which would starve
+`session::run`'s `after_message` and freeze the tray.
+
+Things that are only true because `DefWindowProcW` is not `DefDlgProc`, and
+that break silently if removed:
+
+- `session::run` calls `dialog::pre_translate` **before** `TranslateMessage`.
+  Without it there is no Tab, no Esc, no Enter, no mnemonics
+- **`DM_GETDEFID` is handled by hand.** Left to the fallback, `IsDialogMessageW`
+  sends `IDOK` on Enter *without checking whether that button is enabled*, so
+  Enter would commit settings the greyed-out OK refuses
+- `WM_CTLCOLORSTATIC` is handled, or every label sits on a white box
+- `WM_DESTROY` must not `PostQuitMessage`: the window shares the process's main
+  loop
+- The DPI comes from `GetDpiForMonitor` on the *target* monitor, not from
+  `GetDpiForWindow`. The window is created at the origin, so the latter reports
+  whichever display is there. `WM_DPICHANGED` is ignored until `open` has
+  finished, because the move it reports is the one `open` just made at a size it
+  already computed
+
+Validation lives in `settings::Problem`, shared with `probe_args` so the dialog
+and the command line cannot disagree. Blocking problems grey out OK; warnings
+(a threshold outside 250-500ms, an unmeasured dummy) only show a line, because
+the probes exist to measure odd values. Picking a key already used by the other
+dropdown swaps the two rather than producing a state that then gets refused.
+
+An application manifest is embedded by `crates/app/build.rs` (`embed-manifest`),
+for common controls v6 and per-monitor v2 DPI. **It applies to all four binaries
+and changes DPI awareness process-wide**, the tray icon included — a manifest is
+per crate, not per target.
 
 ## Facts established by measurement
 
@@ -191,13 +233,15 @@ going through `DefWindowProc` would be the thing to suspect.
 
 ## Where things are heading
 
-The one open question with a structural consequence: **the settings file is a
-placeholder for a settings dialog.** The path from a changed value to the running
-state machine is already `PostThreadMessage` → message loop →
-`Machine::set_config`, so a dialog replaces the UI and nothing else. Keep it that
-way.
+The one open question with a structural consequence is now closed: the settings
+dialog exists, and it changed the UI and nothing else. **A changed value still
+reaches the state machine only by `PostThreadMessage` → message loop →
+`Machine::set_config`.** The dialog cannot reach the hook thread at all — its
+window procedure leaves committed settings on an outbox that `main` drains into
+`HookThread::set_config`, in the same place it drains the tray. Keep it that way.
 
 Also undecided, none of them load-bearing yet: showing IME state on the tray
-icon, an exclusion list for games and remote-desktop clients, and the menu-bar
-underline VS Code draws on Alt down, which option A cannot suppress because it
-passes Alt down through untouched.
+icon, an exclusion list for games and remote-desktop clients, a dark-mode title
+bar and controls for the dialog, and the menu-bar underline VS Code draws on Alt
+down, which option A cannot suppress because it passes Alt down through
+untouched.

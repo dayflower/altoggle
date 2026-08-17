@@ -109,8 +109,8 @@ impl Machine {
 
     /// Replace the configuration, discarding any held state.
     ///
-    /// This is the entry point for a settings dialog changing values while the
-    /// app runs. `Machine` lives inside the hook thread, so it cannot be touched
+    /// This is the entry point for the settings dialog changing values while
+    /// the app runs. `Machine` lives in the hook thread, so it cannot be touched
     /// from outside directly: notify the hook thread's message loop with
     /// `PostThreadMessage` and call this **from the loop**. Never call it from
     /// the hook callback.
