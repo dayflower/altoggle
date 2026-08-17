@@ -68,6 +68,7 @@ const IDC_LABEL_RIGHT: i32 = 201;
 const IDC_LABEL_THRESHOLD: i32 = 202;
 const IDC_LABEL_DUMMY: i32 = 203;
 const IDC_DUMMY_PREFIX: i32 = 204;
+const IDC_THRESHOLD_UNIT: i32 = 205;
 
 /// `WS_EX_CONTROLPARENT` is what `GetNextDlgTabItem` looks for when deciding
 /// whether to walk into a child, and is the flag the dialog manager sets on a
@@ -86,7 +87,7 @@ thread_local! {
     /// is not `Send`. `hook.rs` uses atomics only because other threads post
     /// to it; nothing here crosses a thread.
     static WINDOW: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
-    /// Whether the hint is showing a blocking problem, and so should be red.
+    /// Whether the hint is showing a problem, and so should be red.
     ///
     /// Deliberately not inside `STATE`: it is read from `WM_CTLCOLORSTATIC`,
     /// which arrives during a paint that can be provoked while `STATE` is
@@ -164,21 +165,24 @@ const CONTENT_RIGHT: i32 = CLIENT_W - MARGIN;
 /// actually changes. It is the one value here that needs a measurement session
 /// to choose well, and putting it in line with the trigger dropdowns invited
 /// the reading that it is an ordinary choice.
-const GROUP_Y: i32 = 98;
+///
+/// The gap above it is larger than a row step on purpose: the group has to read
+/// as a separate part of the window rather than as a fourth row that happens to
+/// have a box drawn round it.
+const GROUP_Y: i32 = row(2) + ROW_H + 16;
 const GROUP_H: i32 = 53;
 /// Inset from the group box's own edge to its contents.
 const GROUP_PAD: i32 = 9;
 /// First row inside the group, clear of its caption.
 const GROUP_ROW: i32 = GROUP_Y + 20;
 
-/// Three lines for a message a test holds to two.
+/// Two lines, which `settings::MESSAGE_BUDGET` is sized to fit.
 ///
-/// `settings::MESSAGE_BUDGET` is set from what fits on two lines here, but word
-/// wrap does not fill a line evenly and a label clips rather than scrolls. The
-/// spare line is what keeps a message that wraps badly from losing its tail.
-const HINT_Y: i32 = GROUP_Y + GROUP_H + 8;
-const HINT_H: i32 = 46;
-const BTN_Y: i32 = HINT_Y + HINT_H + 8;
+/// The space is reserved whether or not there is anything to say, so that a
+/// message appearing never shoves the buttons down under the pointer.
+const HINT_Y: i32 = GROUP_Y + GROUP_H + 10;
+const HINT_H: i32 = 32;
+const BTN_Y: i32 = HINT_Y + HINT_H + 10;
 const BTN_W: i32 = 80;
 const BTN_H: i32 = 25;
 const BTN_GAP: i32 = 7;
@@ -269,7 +273,7 @@ const CONTROLS: &[Spec] = &[
     Spec {
         id: IDC_LABEL_THRESHOLD,
         class: Class::Static,
-        text: "&Threshold (ms):",
+        text: "&Threshold:",
         style: 0,
         ex_style: 0,
         rect: (MARGIN, row(2) + LABEL_DROP, LABEL_W, LABEL_H),
@@ -283,6 +287,16 @@ const CONTROLS: &[Spec] = &[
         style: WS_TABSTOP | ES_NUMBER as u32 | ES_AUTOHSCROLL as u32,
         ex_style: WS_EX_CLIENTEDGE,
         rect: (FIELD_X, row(2), EDIT_W, ROW_H),
+    },
+    Spec {
+        // The unit rides beside the field rather than inside the label, so it
+        // reads with the number the way the dummy key's "0x" does.
+        id: IDC_THRESHOLD_UNIT,
+        class: Class::Static,
+        text: "ms",
+        style: 0,
+        ex_style: 0,
+        rect: (FIELD_X + EDIT_W + 6, row(2) + LABEL_DROP, 30, LABEL_H),
     },
     Spec {
         // A BUTTON with BS_GROUPBOX is Win32's group box; there is no separate
@@ -754,7 +768,7 @@ fn revalidate(hwnd: HWND, state: &DialogState) {
     let (hint, blocked) = match current {
         Err(why) => (why.to_string(), true),
         Ok(settings) => match settings.problems().first() {
-            Some(problem) => (problem.message(), problem.blocks()),
+            Some(problem) => (problem.message(), true),
             None => (String::new(), false),
         },
     };
@@ -771,7 +785,7 @@ fn commit(hwnd: HWND, state: &mut DialogState) -> bool {
     let Ok(settings) = read(hwnd) else {
         return false;
     };
-    if settings.problems().iter().any(|p| p.blocks()) {
+    if !settings.problems().is_empty() {
         return false;
     }
     // The file first. If it cannot be written, the running config must not move

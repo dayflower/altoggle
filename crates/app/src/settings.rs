@@ -137,10 +137,12 @@ impl Settings {
         }
     }
 
-    /// Everything wrong with these settings, blocking problems first.
+    /// Everything about these settings that cannot work.
     ///
-    /// Blocking problems come first so a caller with room for one line can show
-    /// `problems().first()` and know it is showing the worst of them.
+    /// Only things that cannot work. An unusual value is not one of them: the
+    /// measured bands are written in the config file's comments, and a front
+    /// end that also nagged about them would be arguing with the user over the
+    /// one number they came here to tune.
     pub fn problems(&self) -> Vec<Problem> {
         let mut found = Vec::new();
         if self.left_trigger == self.right_trigger {
@@ -157,25 +159,8 @@ impl Settings {
         {
             found.push(Problem::DummyIsTrigger(key));
         }
-        // Warnings after the blocking problems, so `first()` is the worst one.
-        if self.threshold_ms != 0 && !MEASURED_THRESHOLDS.contains(&self.threshold_ms) {
-            found.push(Problem::ThresholdOutsideMeasuredBand(self.threshold_ms));
-        }
-        if self.dummy_vk != 0 && !measured_dummy(self.dummy_vk) {
-            found.push(Problem::UnmeasuredDummy(self.dummy_vk));
-        }
         found
     }
-}
-
-/// The band the config file recommends, from the measurements in AGENTS.md:
-/// deliberate solo presses reach 257ms, auto-repeat starts around 500ms.
-const MEASURED_THRESHOLDS: std::ops::RangeInclusive<u64> = 250..=500;
-
-/// Dummy keys measured harmless: the default undefined key, and `VK_F13`
-/// through `VK_F24`.
-fn measured_dummy(vk: u16) -> bool {
-    vk == 0x07 || (0x7C..=0x87).contains(&vk)
 }
 
 /// Why a settings combination will not do what it looks like it does.
@@ -196,27 +181,9 @@ pub enum Problem {
     /// solo-press behaviour of its own performs it, which is the exact thing
     /// the dummy exists to prevent.
     DummyIsTrigger(TriggerKey),
-    /// Outside the band the measurements support. Not fatal — this is the
-    /// number a user comes here to tune, and the probes exist to measure odd
-    /// values.
-    ThresholdOutsideMeasuredBand(u64),
-    /// Only `0x07` and `0x7C`-`0x87` were measured harmless. Also not fatal:
-    /// experimenting with dummy keys is a thing this app supports.
-    UnmeasuredDummy(u16),
 }
 
 impl Problem {
-    /// Whether this makes the settings unusable, as opposed to unusual.
-    pub fn blocks(self) -> bool {
-        matches!(
-            self,
-            Problem::SameTrigger(_)
-                | Problem::ThresholdZero
-                | Problem::DummyZero
-                | Problem::DummyIsTrigger(_)
-        )
-    }
-
     /// One sentence, at most `MESSAGE_BUDGET` characters.
     pub fn message(self) -> String {
         match self {
@@ -231,25 +198,9 @@ impl Problem {
             }
             Problem::DummyZero => "0x00 is not a virtual key.".into(),
             Problem::DummyIsTrigger(k) => format!(
-                "The dummy cannot be {}: it would do the thing suppression prevents.",
+                "{} acts on its own solo press, so it cannot be the dummy.",
                 k.name()
             ),
-            // Split by direction rather than described as a band. The two ends
-            // fail differently, and naming the one you actually hit is both
-            // shorter and more use than naming both.
-            Problem::ThresholdOutsideMeasuredBand(ms) if ms < *MEASURED_THRESHOLDS.start() => {
-                format!(
-                    "{ms}ms is under the measured {}ms floor: real presses get missed.",
-                    MEASURED_THRESHOLDS.start()
-                )
-            }
-            Problem::ThresholdOutsideMeasuredBand(ms) => format!(
-                "{ms}ms is over the measured {}ms ceiling: a held key starts firing.",
-                MEASURED_THRESHOLDS.end()
-            ),
-            Problem::UnmeasuredDummy(vk) => {
-                format!("0x{vk:02X} was never measured. Only 0x07 and 0x7C-0x87 are known good.")
-            }
         }
     }
 }
@@ -257,9 +208,10 @@ impl Problem {
 /// How long a `Problem::message` may be.
 ///
 /// The dialog shows it in a fixed two-line label, and about 44 characters fit
-/// on a line at the default font. Over budget the tail is clipped rather than
-/// wrapped into view — and the tail is the half that says what to do about it.
-pub const MESSAGE_BUDGET: usize = 80;
+/// on a line at the default font. Word wrap does not fill a line evenly, so the
+/// budget is well under 88; over it, the tail is clipped rather than wrapped
+/// into view, and the tail is the half that says what to do about it.
+pub const MESSAGE_BUDGET: usize = 72;
 
 /// The `# One of: ...` comment listing every trigger, wrapped.
 ///
@@ -506,8 +458,8 @@ mod tests {
 
     #[test]
     fn every_problem_fits_the_dialogs_label() {
-        // Built from the widest case of each variant: the longest trigger name,
-        // and thresholds at both ends with five digits.
+        // The widest case of each variant: whichever trigger has the longest
+        // name, in every position a name can appear.
         let longest = TriggerKey::ALL
             .into_iter()
             .max_by_key(|k| k.name().len())
@@ -517,17 +469,14 @@ mod tests {
             Problem::ThresholdZero,
             Problem::DummyZero,
             Problem::DummyIsTrigger(longest),
-            Problem::ThresholdOutsideMeasuredBand(99999),
-            Problem::ThresholdOutsideMeasuredBand(1),
-            Problem::UnmeasuredDummy(0x60),
         ];
-        // Plus whatever a real settings value actually produces, so a variant
-        // added later cannot slip past the hand-written list above.
+        // Plus whatever real settings actually produce, so a variant added
+        // later cannot slip past the hand-written list above.
         all.extend(
             Settings {
                 left_trigger: TriggerKey::Menu,
                 right_trigger: TriggerKey::Menu,
-                threshold_ms: 900,
+                threshold_ms: 0,
                 dummy_vk: 0xA4,
             }
             .problems(),
@@ -636,7 +585,6 @@ mod tests {
             s.problems().first().copied(),
             Some(Problem::SameTrigger(TriggerKey::LeftWin))
         );
-        assert!(Problem::SameTrigger(TriggerKey::LeftWin).blocks());
     }
 
     #[test]
@@ -677,34 +625,17 @@ mod tests {
     }
 
     #[test]
-    fn an_unusual_value_is_a_warning_and_never_a_block() {
-        // The probes measure odd values on purpose, so these must not stop a
-        // run; they only earn a line of hint in the dialog.
+    fn an_unusual_but_workable_value_is_not_a_problem() {
+        // A threshold outside the measured band and a dummy nobody has tried
+        // both still work; they are just unwise. The probes exist to measure
+        // exactly these, and a front end that refused them — or nagged about
+        // them — would be arguing with the one number a user comes here to tune.
         let s = Settings {
             threshold_ms: 900,
             dummy_vk: 0x60,
             ..Settings::default()
         };
-        let problems = s.problems();
-        assert!(problems.iter().all(|p| !p.blocks()), "{problems:?}");
-        assert!(problems.contains(&Problem::ThresholdOutsideMeasuredBand(900)));
-        assert!(problems.contains(&Problem::UnmeasuredDummy(0x60)));
-    }
-
-    #[test]
-    fn blocking_problems_come_before_warnings() {
-        // A caller with room for one line shows `first()`, so the order is the
-        // interface, not an implementation detail.
-        let s = Settings {
-            left_trigger: TriggerKey::Menu,
-            right_trigger: TriggerKey::Menu,
-            threshold_ms: 900,
-            dummy_vk: 0x60,
-        };
-        let problems = s.problems();
-        assert!(problems.len() > 1, "{problems:?}");
-        assert!(problems[0].blocks(), "{problems:?}");
-        assert!(!problems.last().unwrap().blocks(), "{problems:?}");
+        assert_eq!(s.problems(), Vec::new(), "{s:?}");
     }
 
     /// A trigger whose up is injected can be stranded down by a partly landed

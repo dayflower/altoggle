@@ -138,10 +138,19 @@ that break silently if removed:
   already computed
 
 Validation lives in `settings::Problem`, shared with `probe_args` so the dialog
-and the command line cannot disagree. Blocking problems grey out OK; warnings
-(a threshold outside 250-500ms, an unmeasured dummy) only show a line, because
-the probes exist to measure odd values. Picking a key already used by the other
-dropdown swaps the two rather than producing a state that then gets refused.
+and the command line cannot disagree. **It reports only what cannot work**, and
+an unusual value is not that: a threshold outside 250-500ms and an untried dummy
+both run. The measured bands are in the config file's comments, and the probes
+exist to measure odd values — a front end that also nagged would be arguing with
+the one number a user came to tune. A problem greys out OK and shows one line,
+held under `settings::MESSAGE_BUDGET` because the label clips rather than wraps.
+Picking a key already used by the other dropdown swaps the two rather than
+producing a state that then gets refused.
+
+The dummy key is hex everywhere — dialog, log, `--dummy`, and `config.toml`
+(`dummy_vk = 0x07`; TOML reads hex integers, and an older file's decimal still
+parses). It sits in its own "Advanced" group because it is the one value here
+that needs a measurement session to choose well.
 
 An application manifest is embedded by `crates/app/build.rs` (`embed-manifest`),
 for common controls v6 and per-monitor v2 DPI. **It applies to all four binaries

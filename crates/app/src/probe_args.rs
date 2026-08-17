@@ -62,7 +62,10 @@ impl ProbeArgs {
                 Some((k, v)) => (k, Some(v)),
                 None => (arg.as_str(), None),
             };
-            let need = |v: Option<&str>| v.ok_or_else(|| format!("{key} needs a value")).map(str::to_owned);
+            let need = |v: Option<&str>| {
+                v.ok_or_else(|| format!("{key} needs a value"))
+                    .map(str::to_owned)
+            };
             match key {
                 "--secs" => args.secs = parse_u64(&need(value)?, key)?,
                 "--threshold" => args.threshold_ms = parse_u64(&need(value)?, key)?,
@@ -79,10 +82,11 @@ impl ProbeArgs {
             }
         }
 
-        // Only the blocking problems. A probe exists to measure odd values, so
-        // --threshold=900 and an unmeasured dummy must stay runnable; what must
-        // not run is a combination that cannot do what the flags say.
-        if let Some(problem) = args.settings().problems().into_iter().find(|p| p.blocks()) {
+        // `problems` reports only what cannot work, so an odd but measurable
+        // value like --threshold=900 still runs, which is the whole point of a
+        // probe. What must not run is a combination that cannot do what the
+        // flags say it does.
+        if let Some(problem) = args.settings().problems().first() {
             return Err(problem.message());
         }
         Ok(args)
