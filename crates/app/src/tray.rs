@@ -4,9 +4,10 @@
 //! a hidden window, and menu clicks arrive as window messages before muda turns
 //! them into channel events.
 //!
-//! Until there is a settings dialog, "Open config file" is the settings UI.
-//! Swapping in a dialog replaces this menu item and nothing else, because the
-//! values reach the state machine through `HookThread::set_config` either way.
+//! "Settings…" is the whole settings UI. Editing the config file by hand still
+//! works, but it is read at start-up only; the dialog is the supported way in,
+//! and the values reach the state machine the same way either way, through
+//! `HookThread::set_config`.
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -14,8 +15,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 /// What the user picked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    OpenConfig,
-    ReloadConfig,
+    OpenSettings,
     ReinstallHooks,
     ToggleAutostart,
     Quit,
@@ -24,8 +24,7 @@ pub enum Command {
 pub struct Tray {
     /// Dropping this removes the icon from the tray, so it has to be kept.
     _icon: TrayIcon,
-    open_config: MenuId,
-    reload_config: MenuId,
+    settings: MenuId,
     reinstall_hooks: MenuId,
     /// Kept whole, not just its id: its checked state has to be readable and
     /// correctable when the registry write fails.
@@ -35,16 +34,15 @@ pub struct Tray {
 
 impl Tray {
     pub fn new(tooltip: &str, autostart_on: bool) -> Result<Self, String> {
-        let open_config = MenuItem::new("Open config file", true, None);
-        let reload_config = MenuItem::new("Reload config", true, None);
+        // The ellipsis is the convention for an item that opens a window.
+        let settings = MenuItem::new("Settings…", true, None);
         let reinstall_hooks = MenuItem::new("Reinstall hooks", true, None);
         let autostart = CheckMenuItem::new("Start with Windows", true, autostart_on, None);
         let quit = MenuItem::new("Quit", true, None);
 
         let menu = Menu::new();
         menu.append_items(&[
-            &open_config,
-            &reload_config,
+            &settings,
             &PredefinedMenuItem::separator(),
             &autostart,
             &reinstall_hooks,
@@ -62,8 +60,7 @@ impl Tray {
 
         Ok(Self {
             _icon: icon,
-            open_config: open_config.id().clone(),
-            reload_config: reload_config.id().clone(),
+            settings: settings.id().clone(),
             reinstall_hooks: reinstall_hooks.id().clone(),
             autostart,
             quit: quit.id().clone(),
@@ -88,10 +85,8 @@ impl Tray {
         let mut out = Vec::new();
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             let id = event.id();
-            let command = if *id == self.open_config {
-                Command::OpenConfig
-            } else if *id == self.reload_config {
-                Command::ReloadConfig
+            let command = if *id == self.settings {
+                Command::OpenSettings
             } else if *id == self.reinstall_hooks {
                 Command::ReinstallHooks
             } else if *id == *self.autostart.id() {

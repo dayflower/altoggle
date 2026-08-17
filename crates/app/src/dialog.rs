@@ -32,7 +32,8 @@ use windows_sys::Win32::UI::Controls::{
     WC_COMBOBOXW, WC_EDITW, WC_STATICW,
 };
 use windows_sys::Win32::UI::HiDpi::{
-    AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
+    AdjustWindowRectExForDpi, GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI,
+    SystemParametersInfoForDpi,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -382,9 +383,13 @@ pub fn open(current: Settings) {
         font: std::ptr::null_mut(),
     }));
 
-    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    // The DPI has to come from the monitor we are about to move to, not from
+    // `GetDpiForWindow`: the window was created at the origin, so that would
+    // report whichever display happens to be there and lay the controls out at
+    // the wrong scale.
+    let (work, dpi) = target_monitor(hwnd);
     with_state(|state| layout(hwnd, state, dpi));
-    place(hwnd, dpi);
+    place(hwnd, work, dpi);
     // Filling the edits emits EN_CHANGE, which runs `revalidate` and so fills
     // the hint in as a side effect. The state has to exist by now for that.
     fill(hwnd, current);
@@ -572,10 +577,32 @@ fn message_font(dpi: u32) -> HFONT {
     unsafe { CreateFontIndirectW(&ncm.lfMessageFont) }
 }
 
-/// Size the window to its content and centre it on the monitor under the cursor
-/// — which is the monitor whose tray was just clicked, and so the one the user
-/// is looking at.
-fn place(hwnd: HWND, dpi: u32) {
+/// The work area and DPI of the monitor the window should open on.
+///
+/// The monitor under the cursor is the one whose tray was just clicked, and so
+/// the one the user is looking at. Its DPI has to be asked of the monitor
+/// rather than of the window, because the window has not been moved there yet.
+fn target_monitor(hwnd: HWND) -> (Option<RECT>, u32) {
+    let mut pt = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut pt) } != 0 {
+        let monitor = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+        let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        let mut dpi_x = 0u32;
+        let mut dpi_y = 0u32;
+        let placed = unsafe { GetMonitorInfoW(monitor, &mut info) } != 0;
+        let scaled =
+            unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) } == 0;
+        if placed && scaled {
+            return (Some(info.rcWork), dpi_x);
+        }
+    }
+    // Whatever monitor the freshly created window landed on is the fallback.
+    (None, unsafe { GetDpiForWindow(hwnd) })
+}
+
+/// Size the window to its content and centre it on `work`.
+fn place(hwnd: HWND, work: Option<RECT>, dpi: u32) {
     let mut frame = RECT {
         left: 0,
         top: 0,
@@ -584,19 +611,6 @@ fn place(hwnd: HWND, dpi: u32) {
     };
     unsafe { AdjustWindowRectExForDpi(&mut frame, STYLE, 0, EX_STYLE, dpi) };
     let (w, h) = (frame.right - frame.left, frame.bottom - frame.top);
-
-    let mut pt = POINT { x: 0, y: 0 };
-    let mut work: Option<RECT> = None;
-    unsafe {
-        if GetCursorPos(&mut pt) != 0 {
-            let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut info: MONITORINFO = std::mem::zeroed();
-            info.cbSize = size_of::<MONITORINFO>() as u32;
-            if GetMonitorInfoW(monitor, &mut info) != 0 {
-                work = Some(info.rcWork);
-            }
-        }
-    }
     let (x, y, flags) = match work {
         Some(r) => (
             r.left + (r.right - r.left - w) / 2,
@@ -810,6 +824,14 @@ unsafe extern "system" fn wnd_proc(
         // just leaves it the wrong size. The rect it suggests is in lParam and
         // the new dpi is in both halves of wParam.
         WM_DPICHANGED => {
+            // `WINDOW` is only set once `open` has finished assembling the
+            // window. Until then the move being reported is the one `open` just
+            // made, deliberately, at a size it already computed for the target
+            // monitor — and the rect Windows suggests here would scale that
+            // size a second time.
+            if WINDOW.get().is_null() {
+                return 0;
+            }
             let suggested = unsafe { &*(lparam as *const RECT) };
             unsafe {
                 SetWindowPos(

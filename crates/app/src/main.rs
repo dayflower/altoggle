@@ -20,11 +20,9 @@
 
 use altoggle_app::settings::Loaded;
 use altoggle_app::tray::{Command, Tray};
-use altoggle_app::{autostart, hook, inject, log, session, settings, single_instance, wide};
+use altoggle_app::{autostart, dialog, hook, inject, log, session, settings, single_instance};
 
 use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 /// One instance per logged-on session.
 const INSTANCE_NAME: &str = "altoggle-single-instance";
@@ -70,30 +68,6 @@ fn load_settings() -> settings::Settings {
         Loaded::Failed(_, why) => log::line(format!("using defaults: {why}")),
     }
     loaded.settings()
-}
-
-/// Hand the config file to whatever the user has associated with .toml.
-fn open_config_file() {
-    let Some(path) = settings::config_path() else {
-        log::line("cannot open the config file: APPDATA is not set");
-        return;
-    };
-    let verb = wide("open");
-    let target = wide(&path.display().to_string());
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            verb.as_ptr(),
-            target.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    // ShellExecuteW reports failure as a value of 32 or less.
-    if result as usize <= 32 {
-        log::line(format!("could not open {}", path.display()));
-    }
 }
 
 /// Warn when autostart points at a different executable than the running one.
@@ -179,15 +153,23 @@ fn main() {
         });
     }
 
+    // What the hook thread is running, so the dialog opens showing the values
+    // that are actually in effect rather than re-reading the file.
+    let mut current = settings;
     let result = session::run(|| {
         for command in tray.poll() {
             match command {
-                Command::OpenConfig => open_config_file(),
-                Command::ReloadConfig => hooks.set_config(load_settings().runtime()),
+                Command::OpenSettings => dialog::open(current),
                 Command::ReinstallHooks => hook::request_reinstall(),
                 Command::ToggleAutostart => toggle_autostart(&tray),
                 Command::Quit => session::request_quit(),
             }
+        }
+        // The dialog cannot reach the hook thread itself, so it leaves what the
+        // user committed here. `set_config` stays the only way in.
+        for applied in dialog::poll() {
+            current = applied;
+            hooks.set_config(applied.runtime());
         }
     });
     if let Err(e) = result {

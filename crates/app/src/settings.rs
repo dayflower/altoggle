@@ -1,11 +1,12 @@
-//! Settings, read from a TOML file.
+//! Settings, stored in a TOML file.
 //!
 //! Trigger keys are named rather than numeric, because a virtual-key code is a
-//! terrible thing to hand-edit and because the eventual settings dialog wants
-//! exactly this list to populate a dropdown.
+//! terrible thing to hand-edit and because `dialog` wants exactly this list to
+//! populate its dropdowns.
 //!
-//! The file is the interim front end for changing settings; a dialog replaces it
-//! later. Either way the values reach the running state machine the same way:
+//! The settings dialog is the front end; the file is the durable record and is
+//! still worth reading, because its comments carry the measurements the values
+//! rest on. Either way the values reach the running state machine the same way:
 //! `HookThread::set_config` posts them to the hook thread's message loop.
 
 use std::path::PathBuf;
@@ -286,7 +287,10 @@ fn trigger_name_comment() -> String {
 fn render(s: &Settings) -> String {
     format!(
         r#"# altoggle configuration.
-# Edit and choose "Reload config" from the tray menu to apply.
+#
+# "Settings..." on the tray menu edits this file, and rewrites it whole when
+# you press OK or Apply: the comments below survive, anything you add does not.
+# Editing it by hand works too, but only takes effect at the next start.
 
 # Which key turns the IME off, and which turns it on.
 {triggers}
