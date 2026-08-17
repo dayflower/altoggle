@@ -135,6 +135,113 @@ impl Settings {
             dummy_vk: self.dummy_vk,
         }
     }
+
+    /// Everything wrong with these settings, blocking problems first.
+    ///
+    /// Blocking problems come first so a caller with room for one line can show
+    /// `problems().first()` and know it is showing the worst of them.
+    pub fn problems(&self) -> Vec<Problem> {
+        let mut found = Vec::new();
+        if self.left_trigger == self.right_trigger {
+            found.push(Problem::SameTrigger(self.left_trigger));
+        }
+        if self.threshold_ms == 0 {
+            found.push(Problem::ThresholdZero);
+        }
+        if self.dummy_vk == 0 {
+            found.push(Problem::DummyZero);
+        } else if let Some(key) = TriggerKey::ALL.into_iter().find(|k| k.vk() == self.dummy_vk) {
+            found.push(Problem::DummyIsTrigger(key));
+        }
+        // Warnings after the blocking problems, so `first()` is the worst one.
+        if self.threshold_ms != 0 && !MEASURED_THRESHOLDS.contains(&self.threshold_ms) {
+            found.push(Problem::ThresholdOutsideMeasuredBand(self.threshold_ms));
+        }
+        if self.dummy_vk != 0 && !measured_dummy(self.dummy_vk) {
+            found.push(Problem::UnmeasuredDummy(self.dummy_vk));
+        }
+        found
+    }
+}
+
+/// The band the config file recommends, from the measurements in AGENTS.md:
+/// deliberate solo presses reach 257ms, auto-repeat starts around 500ms.
+const MEASURED_THRESHOLDS: std::ops::RangeInclusive<u64> = 250..=500;
+
+/// Dummy keys measured harmless: the default undefined key, and `VK_F13`
+/// through `VK_F24`.
+fn measured_dummy(vk: u16) -> bool {
+    vk == 0x07 || (0x7C..=0x87).contains(&vk)
+}
+
+/// Why a settings combination will not do what it looks like it does.
+///
+/// Shared rather than checked at each front end: the probes' command line used
+/// to carry the only such check, which left the dialog and the command line
+/// free to disagree about what is legal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Problem {
+    /// `Machine::side_of` tests the left trigger first, so an equal pair makes
+    /// "IME on" unreachable: every solo press would turn the IME off.
+    SameTrigger(TriggerKey),
+    /// The machine compares `elapsed < threshold_ms`, so zero never fires.
+    ThresholdZero,
+    /// Virtual key 0 is not a key.
+    DummyZero,
+    /// The dummy is injected as a real down and up. A key that has a
+    /// solo-press behaviour of its own performs it, which is the exact thing
+    /// the dummy exists to prevent.
+    DummyIsTrigger(TriggerKey),
+    /// Outside the band the measurements support. Not fatal — this is the
+    /// number a user comes here to tune, and the probes exist to measure odd
+    /// values.
+    ThresholdOutsideMeasuredBand(u64),
+    /// Only 7 and 124-135 were measured harmless. Also not fatal:
+    /// experimenting with dummy keys is a thing this app supports.
+    UnmeasuredDummy(u16),
+}
+
+impl Problem {
+    /// Whether this makes the settings unusable, as opposed to unusual.
+    pub fn blocks(self) -> bool {
+        matches!(
+            self,
+            Problem::SameTrigger(_)
+                | Problem::ThresholdZero
+                | Problem::DummyZero
+                | Problem::DummyIsTrigger(_)
+        )
+    }
+
+    /// One sentence, short enough for a two-line label in the settings dialog.
+    pub fn message(self) -> String {
+        match self {
+            Problem::SameTrigger(k) => format!(
+                "{} is set as both triggers, so every solo press would turn the \
+                 IME off and nothing would turn it on.",
+                k.name()
+            ),
+            Problem::ThresholdZero => {
+                "A threshold of 0 never fires: no press is shorter than it.".into()
+            }
+            Problem::DummyZero => "0 is not a virtual key.".into(),
+            Problem::DummyIsTrigger(k) => format!(
+                "The dummy key cannot be {}: injecting it performs the very \
+                 side effect the dummy exists to suppress.",
+                k.name()
+            ),
+            Problem::ThresholdOutsideMeasuredBand(ms) => format!(
+                "{ms}ms is outside the measured {}-{}ms band: below it you will \
+                 miss presses you meant, above it a held key starts firing.",
+                MEASURED_THRESHOLDS.start(),
+                MEASURED_THRESHOLDS.end(),
+            ),
+            Problem::UnmeasuredDummy(vk) => format!(
+                "Dummy key {vk} was never measured. 7 and 124-135 (F13 to F24) \
+                 were harmless in every application tested."
+            ),
+        }
+    }
 }
 
 /// The `# One of: ...` comment listing every trigger, wrapped.
@@ -432,6 +539,95 @@ mod tests {
         // Win32 names Alt `VK_MENU`, so the obvious misreading of this variant
         // is 0x12 (or the 0xA4/0xA5 pair). It is the context-menu key.
         assert_eq!(TriggerKey::Menu.vk(), 0x5D);
+    }
+
+    #[test]
+    fn the_defaults_have_nothing_wrong_with_them() {
+        assert_eq!(Settings::default().problems(), Vec::new());
+    }
+
+    #[test]
+    fn the_same_key_cannot_mean_both_on_and_off() {
+        // `side_of` tests left first, so an equal pair silently costs the user
+        // "IME on" rather than producing an error anywhere.
+        let s = Settings {
+            left_trigger: TriggerKey::LeftWin,
+            right_trigger: TriggerKey::LeftWin,
+            ..Settings::default()
+        };
+        assert_eq!(
+            s.problems().first().copied(),
+            Some(Problem::SameTrigger(TriggerKey::LeftWin))
+        );
+        assert!(Problem::SameTrigger(TriggerKey::LeftWin).blocks());
+    }
+
+    #[test]
+    fn a_zero_threshold_is_rejected() {
+        // `elapsed < threshold_ms` is a strict compare, so zero turns the whole
+        // feature off rather than making it very strict.
+        let s = Settings {
+            threshold_ms: 0,
+            ..Settings::default()
+        };
+        assert_eq!(s.problems().first().copied(), Some(Problem::ThresholdZero));
+    }
+
+    #[test]
+    fn a_dummy_that_is_also_a_trigger_key_is_rejected() {
+        for key in TriggerKey::ALL {
+            let s = Settings {
+                dummy_vk: key.vk(),
+                ..Settings::default()
+            };
+            assert_eq!(
+                s.problems().first().copied(),
+                Some(Problem::DummyIsTrigger(key)),
+                "dummy {} should be rejected",
+                key.name()
+            );
+        }
+        assert_eq!(
+            Settings {
+                dummy_vk: 0,
+                ..Settings::default()
+            }
+            .problems()
+            .first()
+            .copied(),
+            Some(Problem::DummyZero)
+        );
+    }
+
+    #[test]
+    fn an_unusual_value_is_a_warning_and_never_a_block() {
+        // The probes measure odd values on purpose, so these must not stop a
+        // run; they only earn a line of hint in the dialog.
+        let s = Settings {
+            threshold_ms: 900,
+            dummy_vk: 0x60,
+            ..Settings::default()
+        };
+        let problems = s.problems();
+        assert!(problems.iter().all(|p| !p.blocks()), "{problems:?}");
+        assert!(problems.contains(&Problem::ThresholdOutsideMeasuredBand(900)));
+        assert!(problems.contains(&Problem::UnmeasuredDummy(0x60)));
+    }
+
+    #[test]
+    fn blocking_problems_come_before_warnings() {
+        // A caller with room for one line shows `first()`, so the order is the
+        // interface, not an implementation detail.
+        let s = Settings {
+            left_trigger: TriggerKey::Menu,
+            right_trigger: TriggerKey::Menu,
+            threshold_ms: 900,
+            dummy_vk: 0x60,
+        };
+        let problems = s.problems();
+        assert!(problems.len() > 1, "{problems:?}");
+        assert!(problems[0].blocks(), "{problems:?}");
+        assert!(!problems.last().unwrap().blocks(), "{problems:?}");
     }
 
     /// A trigger whose up is injected can be stranded down by a partly landed

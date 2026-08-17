@@ -11,7 +11,7 @@
 use altoggle_core::Config;
 
 use crate::inject;
-use crate::settings::TriggerKey;
+use crate::settings::{Settings, TriggerKey};
 
 pub struct ProbeArgs {
     /// Seconds before quitting on our own. 0 disables it.
@@ -79,13 +79,22 @@ impl ProbeArgs {
             }
         }
 
-        if args.left == args.right {
-            return Err(format!(
-                "--left and --right are both {}; one key cannot mean both on and off",
-                args.left.name()
-            ));
+        // Only the blocking problems. A probe exists to measure odd values, so
+        // --threshold=900 and an unmeasured dummy must stay runnable; what must
+        // not run is a combination that cannot do what the flags say.
+        if let Some(problem) = args.settings().problems().into_iter().find(|p| p.blocks()) {
+            return Err(problem.message());
         }
         Ok(args)
+    }
+
+    fn settings(&self) -> Settings {
+        Settings {
+            left_trigger: self.left,
+            right_trigger: self.right,
+            threshold_ms: self.threshold_ms,
+            dummy_vk: self.dummy_vk,
+        }
     }
 
     pub fn config(&self) -> Config {
