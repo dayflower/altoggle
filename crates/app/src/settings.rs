@@ -137,16 +137,52 @@ impl Settings {
     }
 }
 
-/// Written when no config file exists yet.
+/// The `# One of: ...` comment listing every trigger, wrapped.
 ///
-/// Hand-written rather than serialized, because a serializer cannot emit the
-/// comments, and the comments are most of the value of a file you edit by hand.
-const TEMPLATE: &str = r#"# altoggle configuration.
+/// Generated from `TriggerKey::ALL` rather than written out, so a tenth trigger
+/// cannot leave the file telling the user about nine.
+fn trigger_name_comment() -> String {
+    const FIRST: &str = "# One of: ";
+    const CONTINUATION: &str = "#         ";
+    const WIDTH: usize = 76;
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::from(FIRST);
+    let mut empty = true;
+    for (i, key) in TriggerKey::ALL.iter().enumerate() {
+        let comma = i + 1 < TriggerKey::ALL.len();
+        let width = key.name().len() + usize::from(comma);
+        if !empty && line.len() + 1 + width > WIDTH {
+            lines.push(line);
+            line = String::from(CONTINUATION);
+            empty = true;
+        }
+        if !empty {
+            line.push(' ');
+        }
+        line.push_str(key.name());
+        if comma {
+            line.push(',');
+        }
+        empty = false;
+    }
+    lines.push(line);
+    lines.join("\n")
+}
+
+/// The whole config file, comments and all, for these values.
+///
+/// The comments live here rather than in the file because a serializer cannot
+/// emit them, and they are most of the value of a file you edit by hand. The
+/// consequence is that saving regenerates the file: the explanations survive,
+/// anything the user added to it does not.
+fn render(s: &Settings) -> String {
+    format!(
+        r#"# altoggle configuration.
 # Edit and choose "Reload config" from the tray menu to apply.
 
 # Which key turns the IME off, and which turns it on.
-# One of: LeftAlt, RightAlt, LeftCtrl, RightCtrl, LeftShift, RightShift,
-#         LeftWin, RightWin, Menu
+{triggers}
 #
 # Whichever key you pick gives up its usual solo-press behaviour: Alt the menu
 # bar, Win the start menu, Menu the context menu. Holding the key past
@@ -156,8 +192,8 @@ const TEMPLATE: &str = r#"# altoggle configuration.
 #
 # Note that many Japanese laptops and JIS keyboards have no right Win key, and
 # some have no Menu key. Mixing sides is fine, for example LeftWin and RightAlt.
-left_trigger = "LeftAlt"
-right_trigger = "RightAlt"
+left_trigger = "{left}"
+right_trigger = "{right}"
 
 # A press shorter than this counts as a solo press.
 #
@@ -167,13 +203,20 @@ right_trigger = "RightAlt"
 #
 # This threshold is also the escape hatch: hold the key past it and the press
 # falls through to Windows untouched, so Alt still opens the menu bar.
-threshold_ms = 400
+threshold_ms = {threshold}
 
 # The key injected to make a solo press stop looking solo, which is what stops
 # Windows from opening the menu bar. 7 is an undefined virtual key and was
 # harmless in every application tested. 124-135 (VK_F13 to VK_F24) also work.
-dummy_vk = 7
-"#;
+dummy_vk = {dummy}
+"#,
+        triggers = trigger_name_comment(),
+        left = s.left_trigger.name(),
+        right = s.right_trigger.name(),
+        threshold = s.threshold_ms,
+        dummy = s.dummy_vk,
+    )
+}
 
 /// `%APPDATA%\altoggle\config.toml`
 pub fn config_path() -> Option<PathBuf> {
@@ -217,7 +260,7 @@ pub fn load() -> Loaded {
         {
             return Loaded::Failed(defaults, format!("could not create {}: {e}", dir.display()));
         }
-        return match std::fs::write(&path, TEMPLATE) {
+        return match std::fs::write(&path, render(&defaults)) {
             Ok(()) => Loaded::Created(defaults),
             Err(e) => Loaded::Failed(defaults, format!("could not write {}: {e}", path.display())),
         };
@@ -233,16 +276,86 @@ pub fn load() -> Loaded {
     }
 }
 
+/// Rewrite the config file from `settings`.
+///
+/// Written beside the target and renamed, because this runs while the app is
+/// resident: an interrupted write in place would leave a truncated file that
+/// the next start rejects, and the user would find that out by losing their
+/// settings rather than at the moment it happened.
+pub fn save(settings: &Settings) -> Result<(), String> {
+    let path = config_path().ok_or_else(|| "APPDATA is not set".to_string())?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, render(settings))
+        .map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("could not replace {}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_template_parses_into_the_defaults() {
+    fn the_rendered_defaults_parse_back_into_the_defaults() {
         // The file handed to the user must not disagree with the built-in
-        // defaults, or the first "Reload config" would silently change behaviour.
-        let parsed: Settings = toml::from_str(TEMPLATE).expect("template must be valid TOML");
+        // defaults, or the first reload would silently change behaviour.
+        let text = render(&Settings::default());
+        let parsed: Settings = toml::from_str(&text).expect("rendered file must be valid TOML");
         assert_eq!(parsed, Settings::default());
+    }
+
+    #[test]
+    fn every_setting_round_trips_through_render() {
+        // The failure mode a parameterised template invites is a placeholder
+        // nobody threaded through, which looks fine until the one value you
+        // changed is the one that stayed behind.
+        for key in TriggerKey::ALL {
+            let other = TriggerKey::ALL
+                .into_iter()
+                .find(|k| *k != key)
+                .expect("more than one trigger");
+            for settings in [
+                Settings {
+                    left_trigger: key,
+                    right_trigger: other,
+                    threshold_ms: 250,
+                    dummy_vk: 124,
+                },
+                Settings {
+                    left_trigger: other,
+                    right_trigger: key,
+                    threshold_ms: 1,
+                    dummy_vk: 135,
+                },
+            ] {
+                let text = render(&settings);
+                let parsed: Settings = toml::from_str(&text)
+                    .unwrap_or_else(|e| panic!("{} rendered invalid TOML: {e}", key.name()));
+                assert_eq!(parsed, settings);
+            }
+        }
+    }
+
+    #[test]
+    fn render_substitutes_every_field() {
+        // Every field differs from its default, so a default leaking through
+        // means that field was never substituted.
+        let text = render(&Settings {
+            left_trigger: TriggerKey::LeftWin,
+            right_trigger: TriggerKey::Menu,
+            threshold_ms: 321,
+            dummy_vk: 130,
+        });
+        assert!(text.contains(r#"left_trigger = "LeftWin""#), "{text}");
+        assert!(text.contains(r#"right_trigger = "Menu""#), "{text}");
+        assert!(text.contains("threshold_ms = 321"), "{text}");
+        assert!(text.contains("dummy_vk = 130"), "{text}");
+        assert!(!text.contains(r#"= "LeftAlt""#), "{text}");
+        assert!(!text.contains("= 400"), "{text}");
+        assert!(!text.contains("= 7"), "{text}");
     }
 
     #[test]
@@ -294,15 +407,18 @@ mod tests {
     }
 
     #[test]
-    fn the_template_lists_every_trigger() {
-        // A key you cannot discover is a key nobody uses.
+    fn the_rendered_file_lists_every_trigger() {
+        // A key you cannot discover is a key nobody uses. This also guards
+        // `trigger_name_comment`, which is the reason that list is generated.
+        let comment = trigger_name_comment();
         for key in TriggerKey::ALL {
             assert!(
-                TEMPLATE.contains(key.name()),
-                "{} is missing from the config template",
+                comment.contains(key.name()),
+                "{} is missing from the config file's list of triggers",
                 key.name()
             );
         }
+        assert!(render(&Settings::default()).contains(&comment));
     }
 
     #[test]
