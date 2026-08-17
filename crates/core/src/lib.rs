@@ -54,7 +54,9 @@ pub enum Action {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
+    /// The key whose solo press turns the IME off, or `VK_NONE`.
     pub left_trigger: u16,
+    /// The key whose solo press turns the IME on, or `VK_NONE`.
     pub right_trigger: u16,
     /// A press shorter than this counts as a solo press.
     ///
@@ -63,6 +65,14 @@ pub struct Config {
     pub threshold_ms: u64,
 }
 
+/// No key: the trigger is switched off.
+///
+/// Zero is not a sentinel chosen for convenience — it is not a virtual key at
+/// all, so no real event can carry it and `side_of` simply never matches. Both
+/// triggers may be `VK_NONE` at once, which leaves the machine inert; a user
+/// who wants one direction and not the other should not have to invent a key
+/// for the other.
+pub const VK_NONE: u16 = 0;
 /// `VK_LMENU`
 pub const VK_LMENU: u16 = 0xA4;
 /// `VK_RMENU`
@@ -408,6 +418,40 @@ mod tests {
             m.on_event(Event::KeyUp(VK_RMENU), 2100),
             Action::Fire(Side::Right)
         );
+    }
+
+    #[test]
+    fn a_trigger_set_to_none_never_fires() {
+        // Wanting one direction and not the other is ordinary, so `VK_NONE`
+        // has to be inert rather than merely unlikely: it is not a virtual key,
+        // so no event can carry it and nothing can match it.
+        let mut m = Machine::new(Config {
+            left_trigger: VK_NONE,
+            right_trigger: VK_RMENU,
+            ..Config::default()
+        });
+        m.on_event(Event::KeyDown(VK_LMENU), 0);
+        assert_eq!(m.on_event(Event::KeyUp(VK_LMENU), 50), Action::None);
+        // The other side still works.
+        m.on_event(Event::KeyDown(VK_RMENU), 100);
+        assert_eq!(
+            m.on_event(Event::KeyUp(VK_RMENU), 150),
+            Action::Fire(Side::Right)
+        );
+    }
+
+    #[test]
+    fn both_triggers_set_to_none_leaves_the_machine_inert() {
+        // Allowed on purpose: it is the "installed but doing nothing" state.
+        let mut m = Machine::new(Config {
+            left_trigger: VK_NONE,
+            right_trigger: VK_NONE,
+            ..Config::default()
+        });
+        for vk in [VK_LMENU, VK_RMENU, VK_LCONTROL, VK_X] {
+            m.on_event(Event::KeyDown(vk), 0);
+            assert_eq!(m.on_event(Event::KeyUp(vk), 50), Action::None, "0x{vk:02X}");
+        }
     }
 
     #[test]

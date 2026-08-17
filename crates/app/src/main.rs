@@ -141,8 +141,10 @@ fn main() {
 
     log::line("started");
     log::line(format!(
-        "  {:?} (solo) -> IME off, {:?} (solo) -> IME on, hold past {}ms -> ordinary key",
-        settings.left_trigger, settings.right_trigger, settings.threshold_ms
+        "  solo {} -> IME off, solo {} -> IME on, hold past {}ms -> ordinary key",
+        settings::slot_name(settings.left_trigger),
+        settings::slot_name(settings.right_trigger),
+        settings.threshold_ms
     ));
 
     if let Some(secs) = exit_after_secs() {

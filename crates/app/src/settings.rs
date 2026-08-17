@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use altoggle_core::Config;
+use altoggle_core::{Config, VK_NONE};
 
 /// A key that can act as a trigger.
 ///
@@ -21,7 +21,7 @@ use altoggle_core::Config;
 /// effect, and that only works for keys whose side effect we have measured. Alt
 /// opens the menu bar and Win opens the start menu; both are suppressed by
 /// injecting a dummy key before the up, which is what makes them eligible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerKey {
     LeftAlt,
     RightAlt,
@@ -69,8 +69,7 @@ impl TriggerKey {
         }
     }
 
-    /// The name used in the config file. Must match the serde variant name; a
-    /// test holds the two together.
+    /// The name used in the config file, the dialog and the probes.
     pub fn name(self) -> &'static str {
         match self {
             TriggerKey::LeftAlt => "LeftAlt",
@@ -94,24 +93,81 @@ impl TriggerKey {
     }
 }
 
+/// What an unset trigger is called in the config file.
+///
+/// TOML has no null, and leaving a key out of the file already means "use the
+/// default" — a test pins that — so switching a trigger off needs a word of its
+/// own rather than an absence.
+pub const NONE_NAME: &str = "None";
+
+/// What a trigger slot is called, whether or not it holds a key.
+pub fn slot_name(slot: Option<TriggerKey>) -> &'static str {
+    match slot {
+        Some(key) => key.name(),
+        None => NONE_NAME,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Settings {
-    /// Solo press of this key turns the IME off.
-    pub left_trigger: TriggerKey,
-    /// Solo press of this key turns the IME on.
-    pub right_trigger: TriggerKey,
+    /// Solo press of this key turns the IME off. `None` switches it off.
+    #[serde(with = "trigger_slot")]
+    pub left_trigger: Option<TriggerKey>,
+    /// Solo press of this key turns the IME on. `None` switches it off.
+    ///
+    /// Wanting one direction and not the other is ordinary — a keyboard with no
+    /// right Win key, or a user who only ever needs the IME turned on — so both
+    /// slots may be empty, including both at once.
+    #[serde(with = "trigger_slot")]
+    pub right_trigger: Option<TriggerKey>,
     /// A press shorter than this counts as a solo press.
     pub threshold_ms: u64,
     /// The key injected to stop a solo press from looking solo.
     pub dummy_vk: u16,
 }
 
+/// Reads and writes a trigger slot as its name, with `NONE_NAME` for empty.
+///
+/// Hand-rolled rather than derived on `TriggerKey`, so that `name` is the only
+/// place a trigger's spelling is decided. A derive would put a second copy of
+/// every name in the file format, free to drift from the one the dialog and the
+/// probes show.
+mod trigger_slot {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::{NONE_NAME, TriggerKey, slot_name};
+
+    pub fn serialize<S: Serializer>(
+        slot: &Option<TriggerKey>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        slot_name(*slot).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<TriggerKey>, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        if name == NONE_NAME {
+            return Ok(None);
+        }
+        // Case-sensitive, unlike `TriggerKey::from_name`: a config file is
+        // edited slowly and read strictly, where a command line is typed fast.
+        TriggerKey::ALL
+            .into_iter()
+            .find(|key| key.name() == name)
+            .map(Some)
+            .ok_or_else(|| D::Error::custom(format!("{name} is not a trigger key")))
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            left_trigger: TriggerKey::LeftAlt,
-            right_trigger: TriggerKey::RightAlt,
+            left_trigger: Some(TriggerKey::LeftAlt),
+            right_trigger: Some(TriggerKey::RightAlt),
             threshold_ms: 400,
             dummy_vk: 0x07,
         }
@@ -129,8 +185,8 @@ impl Settings {
     pub fn runtime(&self) -> Runtime {
         Runtime {
             core: Config {
-                left_trigger: self.left_trigger.vk(),
-                right_trigger: self.right_trigger.vk(),
+                left_trigger: self.left_trigger.map_or(VK_NONE, TriggerKey::vk),
+                right_trigger: self.right_trigger.map_or(VK_NONE, TriggerKey::vk),
                 threshold_ms: self.threshold_ms,
             },
             dummy_vk: self.dummy_vk,
@@ -145,8 +201,12 @@ impl Settings {
     /// one number they came here to tune.
     pub fn problems(&self) -> Vec<Problem> {
         let mut found = Vec::new();
-        if self.left_trigger == self.right_trigger {
-            found.push(Problem::SameTrigger(self.left_trigger));
+        // Two empty slots are not a clash: that is the inert state, which is
+        // allowed. Only two real keys colliding costs the user a direction.
+        if let (Some(left), Some(right)) = (self.left_trigger, self.right_trigger)
+            && left == right
+        {
+            found.push(Problem::SameTrigger(left));
         }
         if self.threshold_ms == 0 {
             found.push(Problem::ThresholdZero);
@@ -222,12 +282,20 @@ fn trigger_name_comment() -> String {
     const CONTINUATION: &str = "#         ";
     const WIDTH: usize = 76;
 
+    // `NONE_NAME` last, because it is the answer to a different question than
+    // the keys are: not "which key", but "neither".
+    let names: Vec<&str> = TriggerKey::ALL
+        .iter()
+        .map(|key| key.name())
+        .chain(std::iter::once(NONE_NAME))
+        .collect();
+
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::from(FIRST);
     let mut empty = true;
-    for (i, key) in TriggerKey::ALL.iter().enumerate() {
-        let comma = i + 1 < TriggerKey::ALL.len();
-        let width = key.name().len() + usize::from(comma);
+    for (i, name) in names.iter().enumerate() {
+        let comma = i + 1 < names.len();
+        let width = name.len() + usize::from(comma);
         if !empty && line.len() + 1 + width > WIDTH {
             lines.push(line);
             line = String::from(CONTINUATION);
@@ -236,7 +304,7 @@ fn trigger_name_comment() -> String {
         if !empty {
             line.push(' ');
         }
-        line.push_str(key.name());
+        line.push_str(name);
         if comma {
             line.push(',');
         }
@@ -267,6 +335,9 @@ fn render(s: &Settings) -> String {
 # bar, Win the start menu, Menu the context menu. Holding the key past
 # threshold_ms below still gets you the original behaviour.
 #
+# "None" leaves that direction alone, for when you only want one of the two.
+# Setting both to "None" is allowed and leaves the app doing nothing.
+#
 # "Menu" is the key with the menu glyph next to right Ctrl, not Alt.
 #
 # Note that many Japanese laptops and JIS keyboards have no right Win key, and
@@ -291,8 +362,8 @@ threshold_ms = {threshold}
 dummy_vk = 0x{dummy:02X}
 "#,
         triggers = trigger_name_comment(),
-        left = s.left_trigger.name(),
-        right = s.right_trigger.name(),
+        left = slot_name(s.left_trigger),
+        right = slot_name(s.right_trigger),
         threshold = s.threshold_ms,
         dummy = s.dummy_vk,
     )
@@ -394,9 +465,12 @@ mod tests {
         // The failure mode a parameterised template invites is a placeholder
         // nobody threaded through, which looks fine until the one value you
         // changed is the one that stayed behind.
-        for key in TriggerKey::ALL {
+        // `None` in each slot as well as every key, because an empty slot is a
+        // spelling in the file like any other.
+        for key in TriggerKey::ALL.map(Some).into_iter().chain([None]) {
             let other = TriggerKey::ALL
                 .into_iter()
+                .map(Some)
                 .find(|k| *k != key)
                 .expect("more than one trigger");
             for settings in [
@@ -412,10 +486,16 @@ mod tests {
                     threshold_ms: 1,
                     dummy_vk: 135,
                 },
+                Settings {
+                    left_trigger: None,
+                    right_trigger: None,
+                    threshold_ms: 400,
+                    dummy_vk: 7,
+                },
             ] {
                 let text = render(&settings);
                 let parsed: Settings = toml::from_str(&text)
-                    .unwrap_or_else(|e| panic!("{} rendered invalid TOML: {e}", key.name()));
+                    .unwrap_or_else(|e| panic!("{} rendered invalid TOML: {e}", slot_name(key)));
                 assert_eq!(parsed, settings);
             }
         }
@@ -426,8 +506,8 @@ mod tests {
         // Every field differs from its default, so a default leaking through
         // means that field was never substituted.
         let text = render(&Settings {
-            left_trigger: TriggerKey::LeftWin,
-            right_trigger: TriggerKey::Menu,
+            left_trigger: Some(TriggerKey::LeftWin),
+            right_trigger: Some(TriggerKey::Menu),
             threshold_ms: 321,
             dummy_vk: 130,
         });
@@ -474,8 +554,8 @@ mod tests {
         // later cannot slip past the hand-written list above.
         all.extend(
             Settings {
-                left_trigger: TriggerKey::Menu,
-                right_trigger: TriggerKey::Menu,
+                left_trigger: Some(TriggerKey::Menu),
+                right_trigger: Some(TriggerKey::Menu),
                 threshold_ms: 0,
                 dummy_vk: 0xA4,
             }
@@ -500,7 +580,7 @@ mod tests {
             dummy_vk = 124
         "#;
         let s: Settings = toml::from_str(text).unwrap();
-        assert_eq!(s.left_trigger, TriggerKey::LeftCtrl);
+        assert_eq!(s.left_trigger, Some(TriggerKey::LeftCtrl));
         assert_eq!(s.runtime().core.left_trigger, 0xA2);
         assert_eq!(s.runtime().core.right_trigger, 0xA1);
         assert_eq!(s.runtime().core.threshold_ms, 250);
@@ -509,9 +589,24 @@ mod tests {
 
     #[test]
     fn a_missing_key_falls_back_to_its_default() {
+        // And so is *not* how a trigger gets switched off — `NONE_NAME` is,
+        // which is the whole reason it has to be a word rather than an absence.
         let s: Settings = toml::from_str("threshold_ms = 300").unwrap();
         assert_eq!(s.threshold_ms, 300);
-        assert_eq!(s.left_trigger, TriggerKey::LeftAlt);
+        assert_eq!(s.left_trigger, Some(TriggerKey::LeftAlt));
+    }
+
+    #[test]
+    fn a_trigger_can_be_switched_off_from_the_file() {
+        let text = format!("left_trigger = \"{NONE_NAME}\"\nright_trigger = \"{NONE_NAME}\"\n");
+        let s: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(s.left_trigger, None);
+        assert_eq!(s.right_trigger, None);
+        // Both off is inert, not an error: the core matches on the vk, and
+        // `VK_NONE` is not one any event can carry.
+        assert_eq!(s.problems(), Vec::new());
+        assert_eq!(s.runtime().core.left_trigger, VK_NONE);
+        assert_eq!(s.runtime().core.right_trigger, VK_NONE);
     }
 
     #[test]
@@ -528,27 +623,32 @@ mod tests {
 
     #[test]
     fn every_trigger_name_is_accepted_by_the_parser() {
-        // `name()` feeds the probes' command lines and the template comment,
-        // while serde reads the config file. They must agree on every variant.
+        // `name()` feeds the probes' command lines and the file's comment,
+        // while `trigger_slot` reads the file itself. They must agree on every
+        // variant, or a name the comment offers would be rejected on use.
         for key in TriggerKey::ALL {
             let text = format!("left_trigger = \"{}\"", key.name());
             let s: Settings = toml::from_str(&text)
-                .unwrap_or_else(|e| panic!("{} is not a serde variant name: {e}", key.name()));
-            assert_eq!(s.left_trigger, key);
+                .unwrap_or_else(|e| panic!("{} is not accepted by the parser: {e}", key.name()));
+            assert_eq!(s.left_trigger, Some(key));
             assert_eq!(TriggerKey::from_name(key.name()), Some(key));
         }
     }
 
     #[test]
-    fn the_rendered_file_lists_every_trigger() {
-        // A key you cannot discover is a key nobody uses. This also guards
-        // `trigger_name_comment`, which is the reason that list is generated.
+    fn the_rendered_file_lists_every_trigger_and_none() {
+        // A key you cannot discover is a key nobody uses, and that goes double
+        // for "None": nothing else in the file hints that it exists. This also
+        // guards `trigger_name_comment`, the reason that list is generated.
         let comment = trigger_name_comment();
-        for key in TriggerKey::ALL {
+        for name in TriggerKey::ALL
+            .iter()
+            .map(|key| key.name())
+            .chain([NONE_NAME])
+        {
             assert!(
-                comment.contains(key.name()),
-                "{} is missing from the config file's list of triggers",
-                key.name()
+                comment.contains(name),
+                "{name} is missing from the config file's list of triggers"
             );
         }
         assert!(render(&Settings::default()).contains(&comment));
@@ -577,8 +677,8 @@ mod tests {
         // `side_of` tests left first, so an equal pair silently costs the user
         // "IME on" rather than producing an error anywhere.
         let s = Settings {
-            left_trigger: TriggerKey::LeftWin,
-            right_trigger: TriggerKey::LeftWin,
+            left_trigger: Some(TriggerKey::LeftWin),
+            right_trigger: Some(TriggerKey::LeftWin),
             ..Settings::default()
         };
         assert_eq!(

@@ -14,6 +14,11 @@ right), or the context-menu key. Whichever key you pick gives up its usual
 solo-press behaviour in exchange: Alt the menu bar, Win the start menu, Menu the
 context menu.
 
+Either trigger can also be switched off — `None` in the file, `(none)` in the
+dialog, `VK_NONE` (zero) in `Config`. Wanting one direction and not the other is
+ordinary, and zero is inert for free because no event can carry it. Both off at
+once is allowed and leaves the app doing nothing.
+
 ## Layout
 
 ```
@@ -93,7 +98,7 @@ user may be typing Japanese with it right now.
 ## Commands
 
 ```bash
-cargo test                    # 43 tests: 20 in core, 18 in settings, the rest in app
+cargo test                    # 47 tests: 22 in core, 20 in settings, the rest in app
 cargo clippy --all-targets    # expected to be clean
 cargo build --release         # the only build that reflects the real deployment
 ```
@@ -145,7 +150,13 @@ exist to measure odd values — a front end that also nagged would be arguing wi
 the one number a user came to tune. A problem greys out OK and shows one line,
 held under `settings::MESSAGE_BUDGET` because the label clips rather than wraps.
 Picking a key already used by the other dropdown swaps the two rather than
-producing a state that then gets refused.
+producing a state that then gets refused — but two `(none)`s are not a clash and
+must not swap.
+
+Trigger names live in `TriggerKey::name` and nowhere else. The config file reads
+them through the hand-written `settings::trigger_slot` serde module rather than
+a derive on the enum, so the file format cannot grow a second copy of every name
+and drift from what the dialog and the probes show.
 
 The dummy key is hex everywhere — dialog, log, `--dummy`, and `config.toml`
 (`dummy_vk = 0x07`; TOML reads hex integers, and an older file's decimal still

@@ -92,10 +92,11 @@ impl ProbeArgs {
         Ok(args)
     }
 
+    /// The probes always watch both sides, so neither slot is ever empty here.
     fn settings(&self) -> Settings {
         Settings {
-            left_trigger: self.left,
-            right_trigger: self.right,
+            left_trigger: Some(self.left),
+            right_trigger: Some(self.right),
             threshold_ms: self.threshold_ms,
             dummy_vk: self.dummy_vk,
         }

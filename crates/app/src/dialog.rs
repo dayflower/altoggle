@@ -70,6 +70,9 @@ const IDC_LABEL_DUMMY: i32 = 203;
 const IDC_DUMMY_PREFIX: i32 = 204;
 const IDC_THRESHOLD_UNIT: i32 = 205;
 
+/// The first row of both dropdowns: leave this direction alone.
+const NONE_LABEL: &str = "(none)";
+
 /// `WS_EX_CONTROLPARENT` is what `GetNextDlgTabItem` looks for when deciding
 /// whether to walk into a child, and is the flag the dialog manager sets on a
 /// real dialog. `WS_EX_DLGMODALFRAME` is only the border.
@@ -103,7 +106,7 @@ struct DialogState {
     applied: Settings,
     /// What the two dropdowns showed before the change being handled. Needed to
     /// swap them: the key one dropdown gave up is the key the other takes.
-    triggers: (TriggerKey, TriggerKey),
+    triggers: (Option<TriggerKey>, Option<TriggerKey>),
     /// The message font, owned by this window.
     font: HFONT,
 }
@@ -155,9 +158,9 @@ const ROW_H: i32 = 23;
 const ROW_STEP: i32 = 29;
 const ROW0: i32 = 11;
 /// The height passed for a `CBS_DROPDOWNLIST` is the height **with the list
-/// dropped down**; the closed height comes from the font. Sized for all nine
-/// triggers so the list never needs scrolling.
-const COMBO_H: i32 = ROW_H + 9 * 18;
+/// dropped down**; the closed height comes from the font. Sized for the nine
+/// triggers plus "(none)", so the list never needs scrolling.
+const COMBO_H: i32 = ROW_H + 10 * 18;
 const CLIENT_W: i32 = 280;
 const CONTENT_RIGHT: i32 = CLIENT_W - MARGIN;
 
@@ -553,10 +556,13 @@ fn create_controls(hwnd: HWND, hinstance: *mut std::ffi::c_void) {
         }
     }
     for id in [IDC_LEFT, IDC_RIGHT] {
-        for key in TriggerKey::ALL {
-            let name = wide(key.name());
+        // "(none)" first, so leaving a direction alone is as reachable as any
+        // key. The parentheses mark it as not-a-key; the config file spells it
+        // `None`, and nothing couples the two because the list is read by index.
+        for label in std::iter::once(NONE_LABEL).chain(TriggerKey::ALL.iter().map(|k| k.name())) {
+            let text = wide(label);
             unsafe {
-                SendDlgItemMessageW(hwnd, id, CB_ADDSTRING, 0, name.as_ptr() as LPARAM);
+                SendDlgItemMessageW(hwnd, id, CB_ADDSTRING, 0, text.as_ptr() as LPARAM);
             }
         }
     }
@@ -675,17 +681,31 @@ fn place(hwnd: HWND, work: Option<RECT>, dpi: u32) {
 // Reading, validating and committing
 // ---------------------------------------------------------------------------
 
-fn combo_selection(hwnd: HWND, id: i32) -> Option<TriggerKey> {
+/// What a dropdown is showing.
+///
+/// Two layers of `Option` and both matter: the inner one is the user's choice
+/// of "no key at all", the outer one is a combo with nothing selected, which
+/// should not happen because `fill` always selects something.
+fn combo_choice(hwnd: HWND, id: i32) -> Option<Option<TriggerKey>> {
     let index = unsafe { SendDlgItemMessageW(hwnd, id, CB_GETCURSEL, 0, 0) };
-    // The list is filled from `TriggerKey::ALL` in order, so the index into the
-    // combo is the index into `ALL`. CB_ERR is -1 and fails the conversion.
-    usize::try_from(index)
-        .ok()
-        .and_then(|i| TriggerKey::ALL.get(i).copied())
+    // CB_ERR is -1 and fails the conversion.
+    let index = usize::try_from(index).ok()?;
+    match index.checked_sub(1) {
+        // Row 0 is "(none)"; the rest are `TriggerKey::ALL` in order, so the
+        // rest of the index is the index into `ALL`.
+        None => Some(None),
+        Some(key) => TriggerKey::ALL.get(key).copied().map(Some),
+    }
 }
 
-fn set_combo(hwnd: HWND, id: i32, key: TriggerKey) {
-    let index = TriggerKey::ALL.iter().position(|k| *k == key).unwrap_or(0);
+fn set_combo(hwnd: HWND, id: i32, slot: Option<TriggerKey>) {
+    let index = match slot {
+        None => 0,
+        Some(key) => TriggerKey::ALL
+            .iter()
+            .position(|k| *k == key)
+            .map_or(0, |i| i + 1),
+    };
     unsafe { SendDlgItemMessageW(hwnd, id, CB_SETCURSEL, index, 0) };
 }
 
@@ -726,8 +746,8 @@ fn read(hwnd: HWND) -> Result<Settings, &'static str> {
     let dummy = u16::from_str_radix(&typed, 16)
         .map_err(|_| "The dummy key is hex: two digits, 00 to FF, no 0x.")?;
     Ok(Settings {
-        left_trigger: combo_selection(hwnd, IDC_LEFT).ok_or("No key chosen.")?,
-        right_trigger: combo_selection(hwnd, IDC_RIGHT).ok_or("No key chosen.")?,
+        left_trigger: combo_choice(hwnd, IDC_LEFT).ok_or("Nothing is selected.")?,
+        right_trigger: combo_choice(hwnd, IDC_RIGHT).ok_or("Nothing is selected.")?,
         threshold_ms: u64::from(threshold),
         dummy_vk: dummy,
     })
@@ -735,18 +755,19 @@ fn read(hwnd: HWND) -> Result<Settings, &'static str> {
 
 /// Keep the two dropdowns from ever holding the same key, by swapping instead.
 ///
-/// The pair has to differ — with both set the same, `Machine::side_of` matches
-/// left first and "IME on" becomes unreachable. Rather than let the user build
-/// that and then refuse it, the clash is resolved the way they almost certainly
+/// Two real keys have to differ — set the same, `Machine::side_of` matches left
+/// first and "IME on" becomes unreachable. Rather than let the user build that
+/// and then refuse it, the clash is resolved the way they almost certainly
 /// meant: setting one side to the other's key swaps the two.
+///
+/// Two empty slots are not a clash and must not swap: "(none)" on both sides is
+/// the inert state, and it is allowed.
 fn keep_triggers_distinct(hwnd: HWND, state: &mut DialogState, changed: i32) {
-    let (Some(left), Some(right)) = (
-        combo_selection(hwnd, IDC_LEFT),
-        combo_selection(hwnd, IDC_RIGHT),
-    ) else {
+    let (Some(left), Some(right)) = (combo_choice(hwnd, IDC_LEFT), combo_choice(hwnd, IDC_RIGHT))
+    else {
         return;
     };
-    if left == right {
+    if left.is_some() && left == right {
         let (was_left, was_right) = state.triggers;
         if changed == IDC_LEFT {
             set_combo(hwnd, IDC_RIGHT, was_left);
@@ -755,8 +776,8 @@ fn keep_triggers_distinct(hwnd: HWND, state: &mut DialogState, changed: i32) {
         }
     }
     state.triggers = (
-        combo_selection(hwnd, IDC_LEFT).unwrap_or(left),
-        combo_selection(hwnd, IDC_RIGHT).unwrap_or(right),
+        combo_choice(hwnd, IDC_LEFT).unwrap_or(left),
+        combo_choice(hwnd, IDC_RIGHT).unwrap_or(right),
     );
 }
 
