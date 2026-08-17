@@ -151,7 +151,10 @@ impl Settings {
         }
         if self.dummy_vk == 0 {
             found.push(Problem::DummyZero);
-        } else if let Some(key) = TriggerKey::ALL.into_iter().find(|k| k.vk() == self.dummy_vk) {
+        } else if let Some(key) = TriggerKey::ALL
+            .into_iter()
+            .find(|k| k.vk() == self.dummy_vk)
+        {
             found.push(Problem::DummyIsTrigger(key));
         }
         // Warnings after the blocking problems, so `first()` is the worst one.
@@ -197,7 +200,7 @@ pub enum Problem {
     /// number a user comes here to tune, and the probes exist to measure odd
     /// values.
     ThresholdOutsideMeasuredBand(u64),
-    /// Only 7 and 124-135 were measured harmless. Also not fatal:
+    /// Only `0x07` and `0x7C`-`0x87` were measured harmless. Also not fatal:
     /// experimenting with dummy keys is a thing this app supports.
     UnmeasuredDummy(u16),
 }
@@ -214,36 +217,49 @@ impl Problem {
         )
     }
 
-    /// One sentence, short enough for a two-line label in the settings dialog.
+    /// One sentence, at most `MESSAGE_BUDGET` characters.
     pub fn message(self) -> String {
         match self {
-            Problem::SameTrigger(k) => format!(
-                "{} is set as both triggers, so every solo press would turn the \
-                 IME off and nothing would turn it on.",
-                k.name()
-            ),
+            Problem::SameTrigger(k) => {
+                format!(
+                    "{} is set for both, so nothing would turn the IME on.",
+                    k.name()
+                )
+            }
             Problem::ThresholdZero => {
                 "A threshold of 0 never fires: no press is shorter than it.".into()
             }
-            Problem::DummyZero => "0 is not a virtual key.".into(),
+            Problem::DummyZero => "0x00 is not a virtual key.".into(),
             Problem::DummyIsTrigger(k) => format!(
-                "The dummy key cannot be {}: injecting it performs the very \
-                 side effect the dummy exists to suppress.",
+                "The dummy cannot be {}: it would do the thing suppression prevents.",
                 k.name()
             ),
+            // Split by direction rather than described as a band. The two ends
+            // fail differently, and naming the one you actually hit is both
+            // shorter and more use than naming both.
+            Problem::ThresholdOutsideMeasuredBand(ms) if ms < *MEASURED_THRESHOLDS.start() => {
+                format!(
+                    "{ms}ms is under the measured {}ms floor: real presses get missed.",
+                    MEASURED_THRESHOLDS.start()
+                )
+            }
             Problem::ThresholdOutsideMeasuredBand(ms) => format!(
-                "{ms}ms is outside the measured {}-{}ms band: below it you will \
-                 miss presses you meant, above it a held key starts firing.",
-                MEASURED_THRESHOLDS.start(),
-                MEASURED_THRESHOLDS.end(),
+                "{ms}ms is over the measured {}ms ceiling: a held key starts firing.",
+                MEASURED_THRESHOLDS.end()
             ),
-            Problem::UnmeasuredDummy(vk) => format!(
-                "Dummy key {vk} was never measured. 7 and 124-135 (F13 to F24) \
-                 were harmless in every application tested."
-            ),
+            Problem::UnmeasuredDummy(vk) => {
+                format!("0x{vk:02X} was never measured. Only 0x07 and 0x7C-0x87 are known good.")
+            }
         }
     }
 }
+
+/// How long a `Problem::message` may be.
+///
+/// The dialog shows it in a fixed two-line label, and about 44 characters fit
+/// on a line at the default font. Over budget the tail is clipped rather than
+/// wrapped into view — and the tail is the half that says what to do about it.
+pub const MESSAGE_BUDGET: usize = 80;
 
 /// The `# One of: ...` comment listing every trigger, wrapped.
 ///
@@ -317,9 +333,10 @@ right_trigger = "{right}"
 threshold_ms = {threshold}
 
 # The key injected to make a solo press stop looking solo, which is what stops
-# Windows from opening the menu bar. 7 is an undefined virtual key and was
-# harmless in every application tested. 124-135 (VK_F13 to VK_F24) also work.
-dummy_vk = {dummy}
+# Windows from opening the menu bar. A virtual-key code, in hex to match the
+# dialog and the probes' --dummy flag. 0x07 is undefined and was harmless in
+# every application tested; 0x7C-0x87 (VK_F13 to VK_F24) also work.
+dummy_vk = 0x{dummy:02X}
 "#,
         triggers = trigger_name_comment(),
         left = s.left_trigger.name(),
@@ -379,7 +396,9 @@ pub fn load() -> Loaded {
 
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
-        Err(e) => return Loaded::Failed(defaults, format!("could not read {}: {e}", path.display())),
+        Err(e) => {
+            return Loaded::Failed(defaults, format!("could not read {}: {e}", path.display()));
+        }
     };
     match toml::from_str::<Settings>(&text) {
         Ok(s) => Loaded::Existing(s),
@@ -463,10 +482,64 @@ mod tests {
         assert!(text.contains(r#"left_trigger = "LeftWin""#), "{text}");
         assert!(text.contains(r#"right_trigger = "Menu""#), "{text}");
         assert!(text.contains("threshold_ms = 321"), "{text}");
-        assert!(text.contains("dummy_vk = 130"), "{text}");
+        assert!(text.contains("dummy_vk = 0x82"), "{text}");
         assert!(!text.contains(r#"= "LeftAlt""#), "{text}");
         assert!(!text.contains("= 400"), "{text}");
-        assert!(!text.contains("= 7"), "{text}");
+        assert!(!text.contains("= 0x07"), "{text}");
+    }
+
+    #[test]
+    fn the_dummy_key_is_written_and_read_back_as_hex() {
+        // The dialog and `--dummy` both speak hex, so the file does too; TOML
+        // reads `0x07` as an integer, and an older file's decimal 7 still works.
+        let text = render(&Settings::default());
+        assert!(text.contains("dummy_vk = 0x07"), "{text}");
+        assert_eq!(
+            toml::from_str::<Settings>(&text).unwrap().dummy_vk,
+            Settings::default().dummy_vk
+        );
+        assert_eq!(
+            toml::from_str::<Settings>("dummy_vk = 7").unwrap().dummy_vk,
+            0x07
+        );
+    }
+
+    #[test]
+    fn every_problem_fits_the_dialogs_label() {
+        // Built from the widest case of each variant: the longest trigger name,
+        // and thresholds at both ends with five digits.
+        let longest = TriggerKey::ALL
+            .into_iter()
+            .max_by_key(|k| k.name().len())
+            .unwrap();
+        let mut all = vec![
+            Problem::SameTrigger(longest),
+            Problem::ThresholdZero,
+            Problem::DummyZero,
+            Problem::DummyIsTrigger(longest),
+            Problem::ThresholdOutsideMeasuredBand(99999),
+            Problem::ThresholdOutsideMeasuredBand(1),
+            Problem::UnmeasuredDummy(0x60),
+        ];
+        // Plus whatever a real settings value actually produces, so a variant
+        // added later cannot slip past the hand-written list above.
+        all.extend(
+            Settings {
+                left_trigger: TriggerKey::Menu,
+                right_trigger: TriggerKey::Menu,
+                threshold_ms: 900,
+                dummy_vk: 0xA4,
+            }
+            .problems(),
+        );
+        for problem in all {
+            let message = problem.message();
+            assert!(
+                message.len() <= MESSAGE_BUDGET,
+                "{problem:?} is {} characters, over the {MESSAGE_BUDGET} budget: {message}",
+                message.len()
+            );
+        }
     }
 
     #[test]

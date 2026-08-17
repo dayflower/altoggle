@@ -37,20 +37,21 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_DEFPUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST,
-    CBS_HASSTRINGS, CreateWindowExW, DC_HASDEFID, DM_GETDEFID, DefWindowProcW, DestroyWindow,
-    EN_CHANGE, ES_AUTOHSCROLL, ES_NUMBER, GetCursorPos, GetDlgItem, GetDlgItemInt, IDC_ARROW,
-    IDCANCEL, IDOK, IsChild, IsDialogMessageW, IsIconic, LoadCursorW, MB_ICONERROR, MB_OK, MSG,
-    MessageBoxW, MoveWindow, NONCLIENTMETRICSW, RegisterClassExW, SPI_GETNONCLIENTMETRICS,
-    SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendDlgItemMessageW,
-    SendMessageW, SetDlgItemInt, SetDlgItemTextW, SetForegroundWindow, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-    WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_NCDESTROY, WM_SETFONT,
-    WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME,
-    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    BS_DEFPUSHBUTTON, BS_GROUPBOX, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE,
+    CBS_DROPDOWNLIST, CBS_HASSTRINGS, CreateWindowExW, DC_HASDEFID, DM_GETDEFID, DefWindowProcW,
+    DestroyWindow, EN_CHANGE, ES_AUTOHSCROLL, ES_NUMBER, ES_UPPERCASE, GetCursorPos, GetDlgItem,
+    GetDlgItemInt, GetDlgItemTextW, IDC_ARROW, IDCANCEL, IDOK, IsChild, IsDialogMessageW, IsIconic,
+    LoadCursorW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW,
+    RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOZORDER, SendDlgItemMessageW, SendMessageW, SetDlgItemInt, SetDlgItemTextW,
+    SetForegroundWindow, SetWindowPos, ShowWindow, SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DPICHANGED, WM_NCDESTROY, WM_SETFONT, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE,
+    WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WS_VSCROLL,
 };
 
-use crate::settings::{Problem, Settings, TriggerKey};
+use crate::settings::{Settings, TriggerKey};
 use crate::{log, settings, wide};
 
 // Control ids. Every control has its own, including the labels, because the
@@ -59,13 +60,14 @@ const IDC_LEFT: i32 = 100;
 const IDC_RIGHT: i32 = 101;
 const IDC_THRESHOLD: i32 = 102;
 const IDC_DUMMY: i32 = 103;
-const IDC_DUMMY_HEX: i32 = 104;
 const IDC_HINT: i32 = 105;
 const IDC_APPLY: i32 = 106;
+const IDC_GROUP: i32 = 199;
 const IDC_LABEL_LEFT: i32 = 200;
 const IDC_LABEL_RIGHT: i32 = 201;
 const IDC_LABEL_THRESHOLD: i32 = 202;
 const IDC_LABEL_DUMMY: i32 = 203;
+const IDC_DUMMY_PREFIX: i32 = 204;
 
 /// `WS_EX_CONTROLPARENT` is what `GetNextDlgTabItem` looks for when deciding
 /// whether to walk into a child, and is the flag the dialog manager sets on a
@@ -146,6 +148,8 @@ const LABEL_DROP: i32 = 4;
 const FIELD_X: i32 = 119;
 const COMBO_W: i32 = 150;
 const EDIT_W: i32 = 60;
+/// Two hex digits and no more.
+const DUMMY_W: i32 = 42;
 const ROW_H: i32 = 23;
 const ROW_STEP: i32 = 29;
 const ROW0: i32 = 11;
@@ -154,14 +158,31 @@ const ROW0: i32 = 11;
 /// triggers so the list never needs scrolling.
 const COMBO_H: i32 = ROW_H + 9 * 18;
 const CLIENT_W: i32 = 280;
-const CLIENT_H: i32 = 213;
 const CONTENT_RIGHT: i32 = CLIENT_W - MARGIN;
-const HINT_Y: i32 = 133;
-const HINT_H: i32 = 32;
-const BTN_Y: i32 = 177;
+
+/// The dummy key lives in its own group, below the three settings anybody
+/// actually changes. It is the one value here that needs a measurement session
+/// to choose well, and putting it in line with the trigger dropdowns invited
+/// the reading that it is an ordinary choice.
+const GROUP_Y: i32 = 98;
+const GROUP_H: i32 = 53;
+/// Inset from the group box's own edge to its contents.
+const GROUP_PAD: i32 = 9;
+/// First row inside the group, clear of its caption.
+const GROUP_ROW: i32 = GROUP_Y + 20;
+
+/// Three lines for a message a test holds to two.
+///
+/// `settings::MESSAGE_BUDGET` is set from what fits on two lines here, but word
+/// wrap does not fill a line evenly and a label clips rather than scrolls. The
+/// spare line is what keeps a message that wraps badly from losing its tail.
+const HINT_Y: i32 = GROUP_Y + GROUP_H + 8;
+const HINT_H: i32 = 46;
+const BTN_Y: i32 = HINT_Y + HINT_H + 8;
 const BTN_W: i32 = 80;
 const BTN_H: i32 = 25;
 const BTN_GAP: i32 = 7;
+const CLIENT_H: i32 = BTN_Y + BTN_H + MARGIN;
 
 const fn row(n: i32) -> i32 {
     ROW0 + n * ROW_STEP
@@ -264,35 +285,50 @@ const CONTROLS: &[Spec] = &[
         rect: (FIELD_X, row(2), EDIT_W, ROW_H),
     },
     Spec {
+        // A BUTTON with BS_GROUPBOX is Win32's group box; there is no separate
+        // class. It draws a frame and a caption and takes no input, so it needs
+        // no tab stop and never appears in a WM_COMMAND.
+        id: IDC_GROUP,
+        class: Class::Button,
+        text: "Advanced",
+        style: BS_GROUPBOX as u32,
+        ex_style: 0,
+        rect: (MARGIN, GROUP_Y, CONTENT_RIGHT - MARGIN, GROUP_H),
+    },
+    Spec {
         id: IDC_LABEL_DUMMY,
         class: Class::Static,
         text: "&Dummy key:",
         style: 0,
         ex_style: 0,
-        rect: (MARGIN, row(3) + LABEL_DROP, LABEL_W, LABEL_H),
+        rect: (
+            MARGIN + GROUP_PAD,
+            GROUP_ROW + LABEL_DROP,
+            LABEL_W - GROUP_PAD,
+            LABEL_H,
+        ),
     },
     Spec {
+        // The "0x" is a label rather than part of the field, so the field can
+        // hold exactly the two digits it accepts and the base is never in doubt.
+        id: IDC_DUMMY_PREFIX,
+        class: Class::Static,
+        text: "0x",
+        style: 0,
+        ex_style: 0,
+        rect: (FIELD_X, GROUP_ROW + LABEL_DROP, 16, LABEL_H),
+    },
+    Spec {
+        // Hex, not ES_NUMBER: the config file, the log and the probes' --dummy
+        // flag all speak hex, and a field that took decimal here would be the
+        // only place that did. Two characters is also exactly the virtual-key
+        // range, so the limit does the range check.
         id: IDC_DUMMY,
         class: Class::Edit,
         text: "",
-        style: WS_TABSTOP | ES_NUMBER as u32 | ES_AUTOHSCROLL as u32,
+        style: WS_TABSTOP | ES_UPPERCASE as u32 | ES_AUTOHSCROLL as u32,
         ex_style: WS_EX_CLIENTEDGE,
-        rect: (FIELD_X, row(3), EDIT_W, ROW_H),
-    },
-    Spec {
-        // The config file writes this key in decimal and the log prints it in
-        // hex. One echo line spares the user doing that conversion in their head.
-        id: IDC_DUMMY_HEX,
-        class: Class::Static,
-        text: "",
-        style: 0,
-        ex_style: 0,
-        rect: (
-            FIELD_X + EDIT_W + 8,
-            row(3) + LABEL_DROP,
-            CONTENT_RIGHT - (FIELD_X + EDIT_W + 8),
-            LABEL_H,
-        ),
+        rect: (FIELD_X + 18, GROUP_ROW, DUMMY_W, ROW_H),
     },
     Spec {
         id: IDC_HINT,
@@ -510,10 +546,11 @@ fn create_controls(hwnd: HWND, hinstance: *mut std::ffi::c_void) {
             }
         }
     }
-    // Five digits covers any threshold worth typing, three covers a byte.
+    // Five digits covers any threshold worth typing. Two hex digits is exactly
+    // the virtual-key range, so the limit is also the range check.
     unsafe {
         SendDlgItemMessageW(hwnd, IDC_THRESHOLD, EM_SETLIMITTEXT, 5, 0);
-        SendDlgItemMessageW(hwnd, IDC_DUMMY, EM_SETLIMITTEXT, 3, 0);
+        SendDlgItemMessageW(hwnd, IDC_DUMMY, EM_SETLIMITTEXT, 2, 0);
     }
 }
 
@@ -521,10 +558,8 @@ fn create_controls(hwnd: HWND, hinstance: *mut std::ffi::c_void) {
 fn fill(hwnd: HWND, settings: Settings) {
     set_combo(hwnd, IDC_LEFT, settings.left_trigger);
     set_combo(hwnd, IDC_RIGHT, settings.right_trigger);
-    unsafe {
-        SetDlgItemInt(hwnd, IDC_THRESHOLD, settings.threshold_ms as u32, 0);
-        SetDlgItemInt(hwnd, IDC_DUMMY, settings.dummy_vk as u32, 0);
-    }
+    unsafe { SetDlgItemInt(hwnd, IDC_THRESHOLD, settings.threshold_ms as u32, 0) };
+    set_text(hwnd, IDC_DUMMY, &format!("{:02X}", settings.dummy_vk));
 }
 
 /// Build the font for `dpi`, move every control, and retire the old font.
@@ -647,6 +682,12 @@ fn number(hwnd: HWND, id: i32) -> Option<u32> {
     (translated != 0).then_some(value)
 }
 
+fn text_of(hwnd: HWND, id: i32) -> String {
+    let mut buffer = [0u16; 64];
+    let len = unsafe { GetDlgItemTextW(hwnd, id, buffer.as_mut_ptr(), buffer.len() as i32) };
+    String::from_utf16_lossy(&buffer[..len as usize])
+}
+
 fn set_text(hwnd: HWND, id: i32, text: &str) {
     let text = wide(text);
     unsafe { SetDlgItemTextW(hwnd, id, text.as_ptr()) };
@@ -656,13 +697,25 @@ fn enable(hwnd: HWND, id: i32, on: bool) {
     unsafe { EnableWindow(GetDlgItem(hwnd, id), i32::from(on)) };
 }
 
-/// What the controls currently say, or `None` if a field is empty or too big.
-fn read(hwnd: HWND) -> Option<Settings> {
-    Some(Settings {
-        left_trigger: combo_selection(hwnd, IDC_LEFT)?,
-        right_trigger: combo_selection(hwnd, IDC_RIGHT)?,
-        threshold_ms: u64::from(number(hwnd, IDC_THRESHOLD)?),
-        dummy_vk: u16::try_from(number(hwnd, IDC_DUMMY)?).ok()?,
+/// What the controls currently say, or why they cannot be read.
+///
+/// The error is what the hint shows, so it is phrased for the user rather than
+/// for a log.
+fn read(hwnd: HWND) -> Result<Settings, &'static str> {
+    let threshold = number(hwnd, IDC_THRESHOLD).ok_or("A threshold is required.")?;
+    // Hex, and never prefixed: the "0x" beside the field is a label, so a typed
+    // one is a mistake rather than a second way of saying the same thing.
+    let typed = text_of(hwnd, IDC_DUMMY);
+    if typed.is_empty() {
+        return Err("A dummy key is required.");
+    }
+    let dummy = u16::from_str_radix(&typed, 16)
+        .map_err(|_| "The dummy key is hex: two digits, 00 to FF, no 0x.")?;
+    Ok(Settings {
+        left_trigger: combo_selection(hwnd, IDC_LEFT).ok_or("No key chosen.")?,
+        right_trigger: combo_selection(hwnd, IDC_RIGHT).ok_or("No key chosen.")?,
+        threshold_ms: u64::from(threshold),
+        dummy_vk: dummy,
     })
 }
 
@@ -696,38 +749,26 @@ fn keep_triggers_distinct(hwnd: HWND, state: &mut DialogState, changed: i32) {
 /// Refresh the hint and the enabled state of OK and Apply.
 fn revalidate(hwnd: HWND, state: &DialogState) {
     let current = read(hwnd);
-    set_text(
-        hwnd,
-        IDC_DUMMY_HEX,
-        &match number(hwnd, IDC_DUMMY) {
-            Some(vk) => format!("= 0x{vk:02X}"),
-            None => String::new(),
+    // The hint only ever reports something wrong. Restating the settings back
+    // at the user in words tells them nothing the two dropdowns above do not.
+    let (hint, blocked) = match current {
+        Err(why) => (why.to_string(), true),
+        Ok(settings) => match settings.problems().first() {
+            Some(problem) => (problem.message(), problem.blocks()),
+            None => (String::new(), false),
         },
-    );
-
-    let problems = current.map(|s| s.problems()).unwrap_or_default();
-    let worst = problems.first().copied();
-    let blocked = current.is_none() || worst.is_some_and(Problem::blocks);
-    let hint = match (current, worst) {
-        (None, _) => "Both numbers are required.".to_string(),
-        (Some(_), Some(problem)) => problem.message(),
-        (Some(s), None) => format!(
-            "Solo {} turns the IME off, solo {} turns it on.",
-            s.left_trigger.name(),
-            s.right_trigger.name()
-        ),
     };
     // Before the text, so the repaint it triggers picks up the colour.
     HINT_IS_BLOCKING.set(blocked);
     set_text(hwnd, IDC_HINT, &hint);
 
     enable(hwnd, IDOK, !blocked);
-    enable(hwnd, IDC_APPLY, !blocked && current != Some(state.applied));
+    enable(hwnd, IDC_APPLY, !blocked && current != Ok(state.applied));
 }
 
 /// Save and apply what the controls say. `false` means nothing was committed.
 fn commit(hwnd: HWND, state: &mut DialogState) -> bool {
-    let Some(settings) = read(hwnd) else {
+    let Ok(settings) = read(hwnd) else {
         return false;
     };
     if settings.problems().iter().any(|p| p.blocks()) {
