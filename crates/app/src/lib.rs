@@ -1,6 +1,7 @@
 //! Win32 adapter: the side that wires the `altoggle-core` state machine to real input.
 
 pub mod autostart;
+pub mod dialog;
 pub mod hook;
 pub mod ime;
 pub mod inject;

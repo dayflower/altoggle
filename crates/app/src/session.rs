@@ -21,7 +21,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MSG, PostThreadMessageW, RegisterClassW, TranslateMessage, WNDCLASSW, WM_DESTROY, WM_QUIT,
 };
 
-use crate::{hook, log, wide};
+use crate::{dialog, hook, log, wide};
 
 /// `WM_WTSSESSION_CHANGE`. Not exported by windows-sys, so declared here.
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
@@ -128,13 +128,24 @@ pub fn run(mut after_message: impl FnMut()) -> Result<(), String> {
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
-        unsafe {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        // The settings window is modeless and shares this loop, so Tab, Esc,
+        // Enter and mnemonics only work if it is offered the message before
+        // TranslateMessage gets it.
+        if !dialog::pre_translate(&msg) {
+            unsafe {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
+        // Runs on every iteration, swallowed messages included: a tray click,
+        // a session change and `--exit-after` all have to keep working while
+        // the settings window is open.
         after_message();
     }
 
+    // WM_QUIT arrives without destroying anything, so the settings window can
+    // still be alive here, holding a font and its state.
+    dialog::close();
     unsafe {
         WTSUnRegisterSessionNotification(hwnd);
         DestroyWindow(hwnd);
