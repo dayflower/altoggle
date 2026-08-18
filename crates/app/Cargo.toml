@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 altoggle-core = { version = "0.1.0", path = "../core" }
+png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
 tray-icon = "0.24.2"
@@ -18,3 +19,4 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Wi
 
 [build-dependencies]
 embed-manifest = "1.5.0"
+embed-resource = "3.0.11"

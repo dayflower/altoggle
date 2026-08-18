@@ -40,19 +40,24 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_DEFPUSHBUTTON, BS_GROUPBOX, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE,
     CBS_DROPDOWNLIST, CBS_HASSTRINGS, CreateWindowExW, DC_HASDEFID, DM_GETDEFID, DefWindowProcW,
     DestroyWindow, EN_CHANGE, ES_AUTOHSCROLL, ES_NUMBER, ES_UPPERCASE, GetCursorPos, GetDlgItem,
-    GetDlgItemInt, GetDlgItemTextW, IDC_ARROW, IDCANCEL, IDOK, IsChild, IsDialogMessageW, IsIconic,
-    LoadCursorW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW,
-    RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOZORDER, SendDlgItemMessageW, SendMessageW, SetDlgItemInt, SetDlgItemTextW,
-    SetForegroundWindow, SetWindowPos, ShowWindow, SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DPICHANGED, WM_NCDESTROY, WM_SETFONT, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE,
-    WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
-    WS_VSCROLL,
+    GetDlgItemInt, GetDlgItemTextW, GetSystemMetrics, HICON, IDC_ARROW, IDCANCEL, IDOK, IMAGE_ICON,
+    IsChild, IsDialogMessageW, IsIconic, LR_SHARED, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK,
+    MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, RegisterClassExW, SM_CXICON, SM_CXSMICON,
+    SM_CYICON, SM_CYSMICON, SPI_GETNONCLIENTMETRICS, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, SYSTEM_METRICS_INDEX, SendDlgItemMessageW, SendMessageW,
+    SetDlgItemInt, SetDlgItemTextW, SetForegroundWindow, SetWindowPos, ShowWindow,
+    SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
+    WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_NCDESTROY, WM_SETFONT,
+    WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME,
+    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 use crate::settings::{Settings, TriggerKey};
 use crate::{log, settings, wide};
+
+/// Resource id of the application icon. Must match the one in `app.rc`, which
+/// uses 1 because the shell picks the lowest-numbered icon for the executable.
+const APP_ICON_ID: usize = 1;
 
 // Control ids. Every control has its own, including the labels, because the
 // layout pass finds them again with `GetDlgItem`.
@@ -502,6 +507,24 @@ pub fn pre_translate(msg: &MSG) -> bool {
 // Construction
 // ---------------------------------------------------------------------------
 
+/// Load the executable's icon at one of the shell's metric sizes.
+///
+/// Resource id 1, matching `app.rc`. `LR_SHARED` is what makes the handle safe
+/// to store in a window class and never destroy: the system owns the copy.
+/// A null result is fine — the window falls back to the default icon.
+fn load_app_icon(cx_metric: SYSTEM_METRICS_INDEX, cy_metric: SYSTEM_METRICS_INDEX) -> HICON {
+    unsafe {
+        LoadImageW(
+            GetModuleHandleW(std::ptr::null()),
+            APP_ICON_ID as *const u16,
+            IMAGE_ICON,
+            GetSystemMetrics(cx_metric),
+            GetSystemMetrics(cy_metric),
+            LR_SHARED,
+        ) as HICON
+    }
+}
+
 fn class_name() -> *const u16 {
     static CLASS: OnceLock<Vec<u16>> = OnceLock::new();
     CLASS
@@ -520,6 +543,11 @@ fn class_name() -> *const u16 {
             class.lpfnWndProc = Some(wnd_proc);
             class.hInstance = unsafe { GetModuleHandleW(std::ptr::null()) };
             class.hCursor = unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) };
+            // The title bar and the Alt-Tab entry. Both are loaded at the size
+            // the shell will ask for, because a single icon stretched to the
+            // other size is what makes a window look homemade.
+            class.hIcon = load_app_icon(SM_CXICON, SM_CYICON);
+            class.hIconSm = load_app_icon(SM_CXSMICON, SM_CYSMICON);
             // Without this the window erases to COLOR_WINDOW (white) and does
             // not read as a dialog. The brush is system-owned: never delete it.
             class.hbrBackground = unsafe { GetSysColorBrush(COLOR_3DFACE) };
