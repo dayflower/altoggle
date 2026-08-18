@@ -91,16 +91,26 @@ and changes DPI awareness process-wide**, the tray icon included — a manifest 
 per crate, not per target.
 
 The same `build.rs` also compiles `crates/app/app.rc` (`embed-resource`), which
-gives the executable its icon. Two consequences and one rule:
+gives the executable its icon and its version resource. Two consequences and one
+rule:
 
-- the resource is per crate too, so the probes carry altoggle's icon
+- the resource is per crate too, so the probes carry altoggle's icon and claim to
+  be altoggle in their file properties
 - **the build now needs `rc.exe` from the Windows SDK.** A toolchain with
   `link.exe` but no SDK resource compiler fails here and nowhere else. The
   failure is deliberately not swallowed
 - **`app.rc` must never gain a manifest.** `embed-manifest` already supplies
   one, and two `RT_MANIFEST` resources produce an executable Windows refuses to
-  start. Combining the two crates is safe only while the `.rc` stays a single
-  `ICON` line
+  start. That is the whole of the rule: other resource types are fine, and the
+  `VERSIONINFO` block is one. Note that it and the icon are both id 1, which does
+  not collide because resource ids are scoped per type
+
+Without `VERSIONINFO` the executable has no product name, no publisher and no
+version at all, which is most of the way to "unknown publisher" on a machine that
+has never seen it. Its version is a second copy of the one in `Cargo.toml`,
+because `rc.exe` cannot read a manifest; a test in `crates/app/src/lib.rs`
+`include_str!`s the `.rc` and asserts the two agree, so a forgotten bump fails
+`cargo test` instead of shipping a binary that reports the previous version.
 
 ## The tray icon
 
@@ -238,6 +248,41 @@ context menu on a swallowed Menu press. The observer was unsure and it was not
 worth the time; every other app tested was clean. Recorded only so that someone
 seeing it later knows it is not new. A console host reading raw input rather than
 going through `DefWindowProc` would be the thing to suspect.
+
+## Releasing
+
+Portable exe, GitHub Releases, no installer and no code signing. The eventual
+destination is a winget or scoop manifest, which is why the zip is named for its
+version and target triple and why the SHA256 is published with it: those are the
+two things such a manifest asks for.
+
+1. Bump `version` in the root `Cargo.toml` **and in `crates/app/app.rc`**
+2. `cargo test` — the drift test in `crates/app/src/lib.rs` fails if you did only
+   one of those two
+3. `.\scripts\release.ps1` — builds `--bin altoggle` alone, stages
+   `altoggle.exe`, `README.md` and `LICENSE` into `dist\`, zips, and prints the
+   SHA256 and the archive's contents
+4. Tag `v<version>`, attach the zip, paste the SHA256
+
+**Only `altoggle.exe` ships.** A `keylog.exe` sitting next to a tray app in a
+downloaded zip is an antivirus incident and a trust problem in one. The script
+exists to make that rule executable; do not hand-assemble a zip instead.
+
+`crates/app` depends on `altoggle-core` **by path with no `version`**. Nothing is
+published, so a version requirement there would be a third copy of the number —
+and a stale one refuses to resolve at the exact moment you bump the other two.
+
+`README.md` is the user-facing document and the only one; it deliberately does
+not mention the probes. It carries the paragraph explaining why SmartScreen warns
+(unsigned, installs a keyboard hook) and what the app actually does about it (no
+network, two writes, unelevated). Those claims are load-bearing: if any of them
+stops being true, that paragraph changes with it.
+
+Not built, and listed here so each stays a decision rather than an oversight: CI,
+a signing certificate, an installer, and arm64. The largest gap the current state
+leaves is that every diagnostic goes to `OutputDebugStringW` only, so a release
+build that refuses to start does so in complete silence — worth fixing the first
+time a user reports "nothing happens".
 
 ## Where things are heading
 

@@ -83,7 +83,9 @@ the keyboard with it.
 - Ctrl+Alt+Del cannot be intercepted. Task Manager is always the last resort;
   killing the process makes Windows drop the hooks
 - Normal exit and panic both inject an up for every modifier. Preserve that. A
-  stuck Win key turns every later keystroke into a hotkey
+  stuck Win key turns every later keystroke into a hotkey. **This is why
+  `[profile.release]` does not set `panic = "abort"`** and must not: aborting
+  skips the unwinding that releases them
 
 **A running instance holds `target/*/altoggle.exe` and cargo cannot replace it.**
 If a build fails with "Access is denied", look for a running `altoggle` before
@@ -93,7 +95,7 @@ user may be typing Japanese with it right now.
 ## Commands
 
 ```bash
-cargo test                    # 50 tests: 22 in core, 21 in settings, the rest in app
+cargo test                    # 51 tests: 22 in core, 21 in settings, the rest in app
 cargo clippy --all-targets    # expected to be clean
 cargo build --release         # the only build that reflects the real deployment
 cargo run -p altoggle-icongen # by hand, only after changing design/
@@ -152,7 +154,13 @@ The full log — every measurement, with what was tried and rejected — is in
   drains into `HookThread::set_config`, in the same place it drains the tray
 - **`app.rc` must never gain a manifest.** `crates/app/build.rs` already embeds
   one through `embed-manifest`, and two `RT_MANIFEST` resources produce an
-  executable Windows refuses to start
+  executable Windows refuses to start. Other resource types are fine — the
+  `VERSIONINFO` block beside the icon is one
+- **`[profile.release]` must not set `panic = "abort"`**, for the reason above:
+  the unwinding is what releases the modifiers
+- **Only `altoggle.exe` is ever distributed.** `cargo build --release` also
+  produces `keylog`, `altprobe` and `imeprobe`; `scripts/release.ps1` builds and
+  packages the one binary so that rule is executable rather than remembered
 
 ## Conventions
 
@@ -176,4 +184,5 @@ Sections of [notes/DEVELOP.md](notes/DEVELOP.md):
 | `build.rs`, `app.rc` | [Build resources](notes/DEVELOP.md#build-resources) |
 | `bin/*.rs`, `probe_args.rs` | [The probes](notes/DEVELOP.md#the-probes) |
 | `settings::render`, `config.toml` | [The config file](notes/DEVELOP.md#the-config-file) |
+| the version, `README.md`, `scripts/` | [Releasing](notes/DEVELOP.md#releasing) |
 | what is still undecided | [Where things are heading](notes/DEVELOP.md#where-things-are-heading) |
