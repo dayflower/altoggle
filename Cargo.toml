@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/core", "crates/app"]
+members = ["crates/core", "crates/app", "crates/icongen"]
+# icongen turns the artwork in design/ into the assets crates/app embeds. It is
+# run by hand when the artwork changes, never as part of a build, so it stays
+# out of `cargo build`, `cargo test` and `cargo clippy --all-targets`: the app
+# must not acquire an SVG toolchain as a build dependency.
+default-members = ["crates/core", "crates/app"]
 resolver = "3"
 
 [workspace.package]
