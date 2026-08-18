@@ -19,7 +19,7 @@ use std::cell::Cell;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
-use crate::icons::{self, Glyph, Theme};
+use crate::icons::{self, IconState};
 use crate::log;
 
 /// What the user picked.
@@ -37,7 +37,7 @@ pub struct Tray {
     icon: TrayIcon,
     artwork: icons::Set,
     /// What `icon` is currently displaying, so an unchanged poll costs nothing.
-    shown: Cell<(Theme, Glyph)>,
+    shown: Cell<IconState>,
     settings: MenuId,
     reinstall_hooks: MenuId,
     /// Kept whole, not just its id: its checked state has to be readable and
@@ -47,15 +47,9 @@ pub struct Tray {
 }
 
 impl Tray {
-    /// `theme` and `glyph` are the state to show straight away, so the first
-    /// icon the user sees is already right rather than correcting itself a
-    /// fraction of a second later.
-    pub fn new(
-        tooltip: &str,
-        autostart_on: bool,
-        theme: Theme,
-        glyph: Glyph,
-    ) -> Result<Self, String> {
+    /// `state` is what to show straight away, so the first icon the user sees is
+    /// already right rather than correcting itself a fraction of a second later.
+    pub fn new(tooltip: &str, autostart_on: bool, state: IconState) -> Result<Self, String> {
         let artwork = icons::Set::load()?;
 
         // The ellipsis is the convention for an item that opens a window.
@@ -78,14 +72,14 @@ impl Tray {
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip(tooltip)
-            .with_icon(artwork.get(theme, glyph))
+            .with_icon(artwork.get(state))
             .build()
             .map_err(|e| format!("could not create the tray icon: {e}"))?;
 
         Ok(Self {
             icon,
             artwork,
-            shown: Cell::new((theme, glyph)),
+            shown: Cell::new(state),
             settings: settings.id().clone(),
             reinstall_hooks: reinstall_hooks.id().clone(),
             autostart,
@@ -93,20 +87,20 @@ impl Tray {
         })
     }
 
-    /// Show the artwork for this IME state and taskbar theme.
+    /// Show the artwork for this state.
     ///
     /// **Returns immediately when nothing changed, and that is load-bearing.**
     /// The caller polls several times a second, while `set_icon` is a
     /// `Shell_NotifyIcon(NIM_MODIFY)` plus a `SendMessageW` to the tray's own
     /// hidden window. Only a real change may reach the shell.
-    pub fn set_state(&self, theme: Theme, glyph: Glyph) {
-        if self.shown.get() == (theme, glyph) {
+    pub fn set_state(&self, state: IconState) {
+        if self.shown.get() == state {
             return;
         }
-        match self.icon.set_icon(Some(self.artwork.get(theme, glyph))) {
+        match self.icon.set_icon(Some(self.artwork.get(state))) {
             // Record only on success, so a transient failure is retried by the
             // next poll rather than being remembered as displayed.
-            Ok(()) => self.shown.set((theme, glyph)),
+            Ok(()) => self.shown.set(state),
             Err(e) => log::line(format!("could not update the tray icon: {e}")),
         }
     }

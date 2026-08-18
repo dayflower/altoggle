@@ -28,8 +28,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    EM_SETLIMITTEXT, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, WC_BUTTONW,
-    WC_COMBOBOXW, WC_EDITW, WC_STATICW,
+    BST_CHECKED, BST_UNCHECKED, EM_SETLIMITTEXT, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
+    InitCommonControlsEx, WC_BUTTONW, WC_COMBOBOXW, WC_EDITW, WC_STATICW,
 };
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI,
@@ -37,12 +37,13 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_DEFPUSHBUTTON, BS_GROUPBOX, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE,
-    CBS_DROPDOWNLIST, CBS_HASSTRINGS, CreateWindowExW, DC_HASDEFID, DM_GETDEFID, DefWindowProcW,
-    DestroyWindow, EN_CHANGE, ES_AUTOHSCROLL, ES_NUMBER, ES_UPPERCASE, GetCursorPos, GetDlgItem,
-    GetDlgItemInt, GetDlgItemTextW, GetSystemMetrics, HICON, IDC_ARROW, IDCANCEL, IDOK, IMAGE_ICON,
-    IsChild, IsDialogMessageW, IsIconic, LR_SHARED, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK,
-    MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, RegisterClassExW, SM_CXICON, SM_CXSMICON,
+    BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_GROUPBOX,
+    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST, CBS_HASSTRINGS,
+    CreateWindowExW, DC_HASDEFID, DM_GETDEFID, DefWindowProcW, DestroyWindow, EN_CHANGE,
+    ES_AUTOHSCROLL, ES_NUMBER, ES_UPPERCASE, GetCursorPos, GetDlgItem, GetDlgItemInt,
+    GetDlgItemTextW, GetSystemMetrics, HICON, IDC_ARROW, IDCANCEL, IDOK, IMAGE_ICON, IsChild,
+    IsDialogMessageW, IsIconic, LR_SHARED, LoadCursorW, LoadImageW, MB_ICONERROR, MB_OK, MSG,
+    MessageBoxW, MoveWindow, NONCLIENTMETRICSW, RegisterClassExW, SM_CXICON, SM_CXSMICON,
     SM_CYICON, SM_CYSMICON, SPI_GETNONCLIENTMETRICS, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOZORDER, SYSTEM_METRICS_INDEX, SendDlgItemMessageW, SendMessageW,
     SetDlgItemInt, SetDlgItemTextW, SetForegroundWindow, SetWindowPos, ShowWindow,
@@ -52,12 +53,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
+use crate::icons::APP_ICON_ID;
 use crate::settings::{Settings, TriggerKey};
 use crate::{log, settings, wide};
-
-/// Resource id of the application icon. Must match the one in `app.rc`, which
-/// uses 1 because the shell picks the lowest-numbered icon for the executable.
-const APP_ICON_ID: usize = 1;
 
 // Control ids. Every control has its own, including the labels, because the
 // layout pass finds them again with `GetDlgItem`.
@@ -65,6 +63,7 @@ const IDC_LEFT: i32 = 100;
 const IDC_RIGHT: i32 = 101;
 const IDC_THRESHOLD: i32 = 102;
 const IDC_DUMMY: i32 = 103;
+const IDC_SHOW_IME: i32 = 104;
 const IDC_HINT: i32 = 105;
 const IDC_APPLY: i32 = 106;
 const IDC_GROUP: i32 = 199;
@@ -177,7 +176,7 @@ const CONTENT_RIGHT: i32 = CLIENT_W - MARGIN;
 /// The gap above it is larger than a row step on purpose: the group has to read
 /// as a separate part of the window rather than as a fourth row that happens to
 /// have a box drawn round it.
-const GROUP_Y: i32 = row(2) + ROW_H + 16;
+const GROUP_Y: i32 = row(3) + ROW_H + 16;
 const GROUP_H: i32 = 53;
 /// Inset from the group box's own edge to its contents.
 const GROUP_PAD: i32 = 9;
@@ -305,6 +304,17 @@ const CONTROLS: &[Spec] = &[
         style: 0,
         ex_style: 0,
         rect: (FIELD_X + EDIT_W + 6, row(2) + LABEL_DROP, 30, LABEL_H),
+    },
+    Spec {
+        // A checkbox rather than a fourth label-and-field row: this is a yes/no
+        // about what the tray shows, not a value to pick, so it spans the width
+        // instead of being squeezed into the field column.
+        id: IDC_SHOW_IME,
+        class: Class::Button,
+        text: "Show the &IME state on the tray icon",
+        style: WS_TABSTOP | BS_AUTOCHECKBOX as u32,
+        ex_style: 0,
+        rect: (MARGIN, row(3), CONTENT_RIGHT - MARGIN, ROW_H),
     },
     Spec {
         // A BUTTON with BS_GROUPBOX is Win32's group box; there is no separate
@@ -516,7 +526,7 @@ fn load_app_icon(cx_metric: SYSTEM_METRICS_INDEX, cy_metric: SYSTEM_METRICS_INDE
     unsafe {
         LoadImageW(
             GetModuleHandleW(std::ptr::null()),
-            APP_ICON_ID as *const u16,
+            APP_ICON_ID as usize as *const u16,
             IMAGE_ICON,
             GetSystemMetrics(cx_metric),
             GetSystemMetrics(cy_metric),
@@ -608,6 +618,12 @@ fn fill(hwnd: HWND, settings: Settings) {
     set_combo(hwnd, IDC_RIGHT, settings.right_trigger);
     unsafe { SetDlgItemInt(hwnd, IDC_THRESHOLD, settings.threshold_ms as u32, 0) };
     set_text(hwnd, IDC_DUMMY, &format!("{:02X}", settings.dummy_vk));
+    let checked = if settings.show_ime_state {
+        BST_CHECKED
+    } else {
+        BST_UNCHECKED
+    };
+    unsafe { SendDlgItemMessageW(hwnd, IDC_SHOW_IME, BM_SETCHECK, checked as WPARAM, 0) };
 }
 
 /// Build the font for `dpi`, move every control, and retire the old font.
@@ -778,6 +794,9 @@ fn read(hwnd: HWND) -> Result<Settings, &'static str> {
         right_trigger: combo_choice(hwnd, IDC_RIGHT).ok_or("Nothing is selected.")?,
         threshold_ms: u64::from(threshold),
         dummy_vk: dummy,
+        show_ime_state: unsafe {
+            SendDlgItemMessageW(hwnd, IDC_SHOW_IME, BM_GETCHECK, 0, 0) == BST_CHECKED as LRESULT
+        },
     })
 }
 
@@ -882,6 +901,9 @@ unsafe extern "system" fn wnd_proc(
                 (IDC_THRESHOLD | IDC_DUMMY, EN_CHANGE) => {
                     with_state(|state| revalidate(hwnd, state))
                 }
+                // BS_AUTOCHECKBOX has already flipped the tick by the time this
+                // arrives, so `read` sees the new value.
+                (IDC_SHOW_IME, BN_CLICKED) => with_state(|state| revalidate(hwnd, state)),
                 (IDOK, _) => {
                     let mut done = false;
                     with_state(|state| done = commit(hwnd, state));

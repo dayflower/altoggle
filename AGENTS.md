@@ -100,7 +100,7 @@ user may be typing Japanese with it right now.
 ## Commands
 
 ```bash
-cargo test                    # 49 tests: 22 in core, 20 in settings, the rest in app
+cargo test                    # 50 tests: 22 in core, 21 in settings, the rest in app
 cargo clippy --all-targets    # expected to be clean
 cargo build --release         # the only build that reflects the real deployment
 ```
@@ -144,6 +144,12 @@ that break silently if removed:
   finished, because the move it reports is the one `open` just made at a size it
   already computed
 
+The IME display is a checkbox rather than a fourth label-and-field row: it is a
+yes/no about what the tray shows, not a value to pick. It sits above the
+"Advanced" group because it is an ordinary preference, and applying it takes
+effect at once — `main` retunes `session::set_tick` and the tray from the same
+outbox it already drains.
+
 Validation lives in `settings::Problem`, shared with `probe_args` so the dialog
 and the command line cannot disagree. **It reports only what cannot work**, and
 an unusual value is not that: a threshold outside 250-500ms and an untried dummy
@@ -184,8 +190,18 @@ gives the executable its icon. Two consequences and one rule:
 
 ## The tray icon
 
-Six pictures: black or white (to contrast with the taskbar) times a Latin **a**
-(IME off), a hiragana **あ** (IME on) and an asterisk (cannot tell).
+**The IME display is off by default**, and then the tray simply carries the
+application icon, loaded from the executable's own resource. `show_ime_state` in
+the config file turns it on, and the settings dialog has a checkbox for it.
+Reading the IME means a `SendMessageTimeout` into the foreground application
+several times a second for as long as altoggle runs, which is cheap but not free
+and not a thing to start doing to somebody who never asked for it. The field
+carries `#[serde(default)]` so an older config file means off as well, and a
+test pins that: an upgrade must not switch polling on behind the user.
+
+When it is on, six pictures: black or white (to contrast with the taskbar) times
+a Latin **a** (IME off), a hiragana **あ** (IME on) and an asterisk (cannot
+tell).
 
 `design/*.svg` and `design/appicon.png` are the masters. `crates/icongen` turns
 them into `crates/app/assets/*.png` and `appicon.ico`, which are committed and
@@ -205,7 +221,12 @@ Three things that are only true for a reason:
 - **The IME read cannot live in a hook callback.** `ime::read_open_status` is a
   `SendMessageTimeout`, and the only foreground-change signal the app has,
   `hook::foreground_proc`, runs on the hook thread against the 300ms budget. So
-  `main`'s `after_message` polls instead, woken by a timer on `session`'s window
+  `main`'s `after_message` polls instead, woken by a timer on `session`'s window.
+  `session::set_tick` starts and stops that timer, so with the display off the
+  loop is not woken at all rather than woken to do nothing. It is deliberately
+  order-independent — `main` decides from its settings before `run` has created
+  the window, and an earlier version that needed the window first silently did
+  nothing
 - **`WM_SETTINGCHANGE` never arrives**, so the light/dark theme is polled on the
   same tick. Windows broadcasts it with `"ImmersiveColorSet"`, but `session`'s
   window is parented to `HWND_MESSAGE` and gets no broadcasts. Reading

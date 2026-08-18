@@ -15,7 +15,7 @@
 //! `WM_SETTINGCHANGE` with `"ImmersiveColorSet"` — but it does not reach an
 //! `HWND_MESSAGE` window, so that is polled on the same tick.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -52,6 +52,48 @@ const TICK_TIMER: usize = 1;
 const TICK_MS: u32 = 400;
 
 static MAIN_TID: AtomicU32 = AtomicU32::new(0);
+
+/// The message-only window, so `set_tick` can reach its timer.
+static TICK_WINDOW: AtomicIsize = AtomicIsize::new(0);
+
+/// Whether the heartbeat should be running.
+///
+/// Held separately from the timer so that `set_tick` works before `run` has
+/// created the window: `main` reads its settings and decides long before the
+/// loop starts, and an order-dependent version of this silently did nothing.
+static TICK_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// Start or stop the heartbeat.
+///
+/// Off is the default, because the only thing the tick drives is the IME read
+/// and that is off by default too. Waking the loop several times a second to
+/// decide there is nothing to do is not free, and a resident app has no excuse
+/// for it.
+///
+/// **Main thread only.** `SetTimer` and `KillTimer` want the thread that owns
+/// the window, which is the thread running `run`.
+pub fn set_tick(on: bool) {
+    TICK_WANTED.store(on, Ordering::SeqCst);
+    apply_tick();
+}
+
+/// Make the timer match `TICK_WANTED`, if there is a window to hang it on.
+fn apply_tick() {
+    let hwnd = TICK_WINDOW.load(Ordering::SeqCst) as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    if TICK_WANTED.load(Ordering::SeqCst) {
+        // Resetting an already-running timer is harmless. Failure is not fatal:
+        // the tray icon stops following the IME, which must not cost the user
+        // the ability to type.
+        if unsafe { SetTimer(hwnd, TICK_TIMER, TICK_MS, None) } == 0 {
+            log::line("SetTimer failed: the tray icon will not follow the IME");
+        }
+    } else {
+        unsafe { KillTimer(hwnd, TICK_TIMER) };
+    }
+}
 
 /// Ask the main loop to quit. Safe to call from any thread.
 pub fn request_quit() {
@@ -149,12 +191,10 @@ pub fn run(mut after_message: impl FnMut()) -> Result<(), String> {
         log::line("WTSRegisterSessionNotification failed: session changes will not be tracked");
     }
 
-    // Also not fatal, for the same reason: a tray icon that stops following the
-    // IME is a nuisance, and taking the app down over it would cost the user
-    // the ability to type.
-    if unsafe { SetTimer(hwnd, TICK_TIMER, TICK_MS, None) } == 0 {
-        log::line("SetTimer failed: the tray icon will not follow the IME");
-    }
+    // The heartbeat runs only if the settings asked for the IME display, which
+    // `main` may already have decided before this window existed.
+    TICK_WINDOW.store(hwnd as isize, Ordering::SeqCst);
+    apply_tick();
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
@@ -176,6 +216,7 @@ pub fn run(mut after_message: impl FnMut()) -> Result<(), String> {
     // WM_QUIT arrives without destroying anything, so the settings window can
     // still be alive here, holding a font and its state.
     dialog::close();
+    TICK_WINDOW.store(0, Ordering::SeqCst);
     unsafe {
         KillTimer(hwnd, TICK_TIMER);
         WTSUnRegisterSessionNotification(hwnd);

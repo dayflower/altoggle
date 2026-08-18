@@ -34,6 +34,10 @@ use crate::wide;
 /// shell's own downscale.
 const SIZE: u32 = 32;
 
+/// Resource id of the application icon, matching `app.rc`, which uses 1 because
+/// the shell picks the lowest-numbered icon for the executable.
+pub const APP_ICON_ID: u16 = 1;
+
 const THEME_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
 const THEME_VALUE: &str = "SystemUsesLightTheme";
 
@@ -50,6 +54,18 @@ pub enum Glyph {
     Latin,
     Kana,
     Unknown,
+}
+
+/// What the tray is showing.
+///
+/// `AppIcon` is not a third glyph: it is the setting turned off, and it means
+/// nobody is reading the IME at all. Keeping it in the same value as the two
+/// live ones is what lets `Tray::set_state` compare old against new and stay
+/// silent when neither changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconState {
+    AppIcon,
+    Ime { theme: Theme, glyph: Glyph },
 }
 
 /// Pick the glyph for what `ime::read_open_status` reported.
@@ -116,6 +132,9 @@ fn light_taskbar() -> Option<bool> {
 /// `Icon` is a reference-counted `HICON`, so handing one out is a clone of an
 /// `Arc` rather than another `CreateIcon`.
 pub struct Set {
+    /// Shown when the IME display is switched off. Loaded from the executable's
+    /// own icon resource, so it is the same picture Explorer and Alt-Tab show.
+    app: Icon,
     black_latin: Icon,
     black_kana: Icon,
     black_unknown: Icon,
@@ -127,6 +146,8 @@ pub struct Set {
 impl Set {
     pub fn load() -> Result<Self, String> {
         Ok(Self {
+            app: Icon::from_resource(APP_ICON_ID, Some((SIZE, SIZE)))
+                .map_err(|e| format!("could not load the application icon: {e}"))?,
             black_latin: decode(include_bytes!("../assets/tray-black-en.png"))?,
             black_kana: decode(include_bytes!("../assets/tray-black-ja.png"))?,
             black_unknown: decode(include_bytes!("../assets/tray-black-undef.png"))?,
@@ -136,7 +157,11 @@ impl Set {
         })
     }
 
-    pub fn get(&self, theme: Theme, glyph: Glyph) -> Icon {
+    pub fn get(&self, state: IconState) -> Icon {
+        let (theme, glyph) = match state {
+            IconState::AppIcon => return self.app.clone(),
+            IconState::Ime { theme, glyph } => (theme, glyph),
+        };
         let icon = match (theme, glyph) {
             (Theme::Black, Glyph::Latin) => &self.black_latin,
             (Theme::Black, Glyph::Kana) => &self.black_kana,

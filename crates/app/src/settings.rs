@@ -96,7 +96,7 @@ impl TriggerKey {
 /// What an unset trigger is called in the config file.
 ///
 /// TOML has no null, and leaving a key out of the file already means "use the
-/// default" — a test pins that — so switching a trigger off needs a word of its
+/// default" â a test pins that â so switching a trigger off needs a word of its
 /// own rather than an absence.
 pub const NONE_NAME: &str = "None";
 
@@ -116,8 +116,8 @@ pub struct Settings {
     pub left_trigger: Option<TriggerKey>,
     /// Solo press of this key turns the IME on. `None` switches it off.
     ///
-    /// Wanting one direction and not the other is ordinary — a keyboard with no
-    /// right Win key, or a user who only ever needs the IME turned on — so both
+    /// Wanting one direction and not the other is ordinary â a keyboard with no
+    /// right Win key, or a user who only ever needs the IME turned on â so both
     /// slots may be empty, including both at once.
     #[serde(with = "trigger_slot")]
     pub right_trigger: Option<TriggerKey>,
@@ -125,6 +125,15 @@ pub struct Settings {
     pub threshold_ms: u64,
     /// The key injected to stop a solo press from looking solo.
     pub dummy_vk: u16,
+    /// Whether the tray icon reports the IME state instead of just being the
+    /// application icon.
+    ///
+    /// Off by default, and `#[serde(default)]` so an older config file means off
+    /// too. Reading the IME costs a `SendMessageTimeout` into the foreground
+    /// application several times a second forever, which is not a thing to start
+    /// doing to somebody who did not ask for it.
+    #[serde(default)]
+    pub show_ime_state: bool,
 }
 
 /// Reads and writes a trigger slot as its name, with `NONE_NAME` for empty.
@@ -170,6 +179,7 @@ impl Default for Settings {
             right_trigger: Some(TriggerKey::RightAlt),
             threshold_ms: 400,
             dummy_vk: 0x07,
+            show_ime_state: false,
         }
     }
 }
@@ -360,12 +370,22 @@ threshold_ms = {threshold}
 # dialog and the probes' --dummy flag. 0x07 is undefined and was harmless in
 # every application tested; 0x7C-0x87 (VK_F13 to VK_F24) also work.
 dummy_vk = 0x{dummy:02X}
+
+# Whether the tray icon shows what the IME is doing: a Latin "a" when it is off,
+# a hiragana "あ" when it is on, and an asterisk when it cannot be read.
+#
+# Off by default, and then the tray just carries the application icon. Reading
+# the IME means asking the foreground application, several times a second, for
+# as long as altoggle runs. That is cheap but it is not free, and it is not
+# something to do to a machine whose owner never asked for the display.
+show_ime_state = {show_ime}
 "#,
         triggers = trigger_name_comment(),
         left = slot_name(s.left_trigger),
         right = slot_name(s.right_trigger),
         threshold = s.threshold_ms,
         dummy = s.dummy_vk,
+        show_ime = s.show_ime_state,
     )
 }
 
@@ -479,18 +499,21 @@ mod tests {
                     right_trigger: other,
                     threshold_ms: 250,
                     dummy_vk: 124,
+                    show_ime_state: false,
                 },
                 Settings {
                     left_trigger: other,
                     right_trigger: key,
                     threshold_ms: 1,
                     dummy_vk: 135,
+                    show_ime_state: false,
                 },
                 Settings {
                     left_trigger: None,
                     right_trigger: None,
                     threshold_ms: 400,
                     dummy_vk: 7,
+                    show_ime_state: false,
                 },
             ] {
                 let text = render(&settings);
@@ -502,6 +525,25 @@ mod tests {
     }
 
     #[test]
+    fn the_ime_display_stays_off_unless_it_is_asked_for() {
+        // Reading the IME costs a SendMessageTimeout into the foreground
+        // application several times a second, for as long as the app runs. It
+        // is opt-in, and an upgrade must not switch it on behind the user.
+        assert!(!Settings::default().show_ime_state);
+
+        let older_file = toml::from_str::<Settings>(
+            r#"
+            left_trigger = "LeftAlt"
+            right_trigger = "RightAlt"
+            threshold_ms = 400
+            dummy_vk = 0x07
+            "#,
+        )
+        .expect("a config file written before this setting existed must still load");
+        assert!(!older_file.show_ime_state);
+    }
+
+    #[test]
     fn render_substitutes_every_field() {
         // Every field differs from its default, so a default leaking through
         // means that field was never substituted.
@@ -510,11 +552,13 @@ mod tests {
             right_trigger: Some(TriggerKey::Menu),
             threshold_ms: 321,
             dummy_vk: 130,
+            show_ime_state: true,
         });
         assert!(text.contains(r#"left_trigger = "LeftWin""#), "{text}");
         assert!(text.contains(r#"right_trigger = "Menu""#), "{text}");
         assert!(text.contains("threshold_ms = 321"), "{text}");
         assert!(text.contains("dummy_vk = 0x82"), "{text}");
+        assert!(text.contains("show_ime_state = true"), "{text}");
         assert!(!text.contains(r#"= "LeftAlt""#), "{text}");
         assert!(!text.contains("= 400"), "{text}");
         assert!(!text.contains("= 0x07"), "{text}");
@@ -558,6 +602,7 @@ mod tests {
                 right_trigger: Some(TriggerKey::Menu),
                 threshold_ms: 0,
                 dummy_vk: 0xA4,
+                show_ime_state: false,
             }
             .problems(),
         );
@@ -589,7 +634,7 @@ mod tests {
 
     #[test]
     fn a_missing_key_falls_back_to_its_default() {
-        // And so is *not* how a trigger gets switched off — `NONE_NAME` is,
+        // And so is *not* how a trigger gets switched off â `NONE_NAME` is,
         // which is the whole reason it has to be a word rather than an absence.
         let s: Settings = toml::from_str("threshold_ms = 300").unwrap();
         assert_eq!(s.threshold_ms, 300);
@@ -728,8 +773,8 @@ mod tests {
     fn an_unusual_but_workable_value_is_not_a_problem() {
         // A threshold outside the measured band and a dummy nobody has tried
         // both still work; they are just unwise. The probes exist to measure
-        // exactly these, and a front end that refused them — or nagged about
-        // them — would be arguing with the one number a user comes here to tune.
+        // exactly these, and a front end that refused them â or nagged about
+        // them â would be arguing with the one number a user comes here to tune.
         let s = Settings {
             threshold_ms: 900,
             dummy_vk: 0x60,

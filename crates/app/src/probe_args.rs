@@ -99,6 +99,9 @@ impl ProbeArgs {
             right_trigger: Some(self.right),
             threshold_ms: self.threshold_ms,
             dummy_vk: self.dummy_vk,
+            // The probes have no tray icon, so the display setting is only
+            // here to satisfy the shared `Problem` validation.
+            show_ime_state: false,
         }
     }
 
