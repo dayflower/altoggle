@@ -155,7 +155,15 @@ fn main() {
 
     // Without a tray icon there would be no way to quit a release build, which
     // has no console and so no Ctrl+C.
-    let tray = match Tray::new("altoggle", autostart::is_enabled(), tray_state(&settings)) {
+    //
+    // The tooltip carries the version because a windows-subsystem binary can
+    // print nothing: there is no console for a --version to write to, so the
+    // tooltip and the file properties are the only places to read it from.
+    let tray = match Tray::new(
+        concat!("altoggle ", env!("CARGO_PKG_VERSION")),
+        autostart::is_enabled(),
+        tray_state(&settings),
+    ) {
         Ok(t) => t,
         Err(e) => {
             hooks.shutdown();
