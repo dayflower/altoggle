@@ -8,9 +8,19 @@
 //! works, but it is read at start-up only; the dialog is the supported way in,
 //! and the values reach the state machine the same way either way, through
 //! `HookThread::set_config`.
+//!
+//! The icon shows what the IME is doing. It is pushed here by `set_state`, from
+//! the poll in `main`'s `after_message`; nothing in this module reads the IME,
+//! because `ime::read_open_status` blocks and this is the thread the tray menu
+//! and the settings window are pumped on.
+
+use std::cell::Cell;
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{TrayIcon, TrayIconBuilder};
+
+use crate::icons::{self, Glyph, Theme};
+use crate::log;
 
 /// What the user picked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,8 +32,12 @@ pub enum Command {
 }
 
 pub struct Tray {
-    /// Dropping this removes the icon from the tray, so it has to be kept.
-    _icon: TrayIcon,
+    /// Dropping this removes the icon from the tray, so it has to be kept —
+    /// and `set_state` needs it anyway.
+    icon: TrayIcon,
+    artwork: icons::Set,
+    /// What `icon` is currently displaying, so an unchanged poll costs nothing.
+    shown: Cell<(Theme, Glyph)>,
     settings: MenuId,
     reinstall_hooks: MenuId,
     /// Kept whole, not just its id: its checked state has to be readable and
@@ -33,7 +47,17 @@ pub struct Tray {
 }
 
 impl Tray {
-    pub fn new(tooltip: &str, autostart_on: bool) -> Result<Self, String> {
+    /// `theme` and `glyph` are the state to show straight away, so the first
+    /// icon the user sees is already right rather than correcting itself a
+    /// fraction of a second later.
+    pub fn new(
+        tooltip: &str,
+        autostart_on: bool,
+        theme: Theme,
+        glyph: Glyph,
+    ) -> Result<Self, String> {
+        let artwork = icons::Set::load()?;
+
         // The ellipsis is the convention for an item that opens a window.
         let settings = MenuItem::new("Settings…", true, None);
         let reinstall_hooks = MenuItem::new("Reinstall hooks", true, None);
@@ -54,17 +78,37 @@ impl Tray {
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip(tooltip)
-            .with_icon(make_icon()?)
+            .with_icon(artwork.get(theme, glyph))
             .build()
             .map_err(|e| format!("could not create the tray icon: {e}"))?;
 
         Ok(Self {
-            _icon: icon,
+            icon,
+            artwork,
+            shown: Cell::new((theme, glyph)),
             settings: settings.id().clone(),
             reinstall_hooks: reinstall_hooks.id().clone(),
             autostart,
             quit: quit.id().clone(),
         })
+    }
+
+    /// Show the artwork for this IME state and taskbar theme.
+    ///
+    /// **Returns immediately when nothing changed, and that is load-bearing.**
+    /// The caller polls several times a second, while `set_icon` is a
+    /// `Shell_NotifyIcon(NIM_MODIFY)` plus a `SendMessageW` to the tray's own
+    /// hidden window. Only a real change may reach the shell.
+    pub fn set_state(&self, theme: Theme, glyph: Glyph) {
+        if self.shown.get() == (theme, glyph) {
+            return;
+        }
+        match self.icon.set_icon(Some(self.artwork.get(theme, glyph))) {
+            // Record only on success, so a transient failure is retried by the
+            // next poll rather than being remembered as displayed.
+            Ok(()) => self.shown.set((theme, glyph)),
+            Err(e) => log::line(format!("could not update the tray icon: {e}")),
+        }
     }
 
     /// Whether the autostart item is currently ticked.
@@ -100,57 +144,4 @@ impl Tray {
         }
         out
     }
-}
-
-/// Draw the icon rather than shipping an .ico file.
-///
-/// A toggle switch: a pill with the knob to one side. Drawn from signed
-/// distances so the edges are antialiased, which matters at 32x32 where a hard
-/// edge reads as a jagged blob.
-fn make_icon() -> Result<Icon, String> {
-    const SIZE: u32 = 32;
-    /// Pill body, mid blue: visible against both light and dark taskbars.
-    const BODY: [u8; 3] = [0x3D, 0x7E, 0xC8];
-    /// Knob, near white.
-    const KNOB: [u8; 3] = [0xF5, 0xF7, 0xFA];
-
-    // Pill: the segment from (10,16) to (22,16) grown by radius 7.
-    let (pill_x0, pill_x1, pill_cy, pill_r) = (10.0f32, 22.0f32, 16.0f32, 7.0f32);
-    // Knob: a disc at the right-hand cap.
-    let (knob_cx, knob_cy, knob_r) = (22.0f32, 16.0f32, 4.0f32);
-
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            // Sample at pixel centres.
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-
-            let nearest_x = px.clamp(pill_x0, pill_x1);
-            let pill_d = ((px - nearest_x).powi(2) + (py - pill_cy).powi(2)).sqrt() - pill_r;
-            let knob_d = ((px - knob_cx).powi(2) + (py - knob_cy).powi(2)).sqrt() - knob_r;
-
-            // Coverage across one pixel of the edge.
-            let pill_a = (0.5 - pill_d).clamp(0.0, 1.0);
-            let knob_a = (0.5 - knob_d).clamp(0.0, 1.0);
-
-            // Knob over body, both over transparency.
-            let alpha = pill_a.max(knob_a);
-            let color = if alpha <= 0.0 {
-                [0, 0, 0]
-            } else {
-                let mut c = [0u8; 3];
-                for i in 0..3 {
-                    let body = BODY[i] as f32;
-                    let knob = KNOB[i] as f32;
-                    c[i] = (body * (1.0 - knob_a) + knob * knob_a).round() as u8;
-                }
-                c
-            };
-
-            rgba.extend_from_slice(&[color[0], color[1], color[2], (alpha * 255.0).round() as u8]);
-        }
-    }
-
-    Icon::from_rgba(rgba, SIZE, SIZE).map_err(|e| format!("could not build the tray icon: {e}"))
 }

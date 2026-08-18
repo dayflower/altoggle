@@ -18,14 +18,26 @@
 // Release builds therefore log through OutputDebugStringW only (see `log`).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::time::{Duration, Instant};
+
 use altoggle_app::settings::Loaded;
 use altoggle_app::tray::{Command, Tray};
-use altoggle_app::{autostart, dialog, hook, inject, log, session, settings, single_instance};
+use altoggle_app::{
+    autostart, dialog, hook, icons, ime, inject, log, session, settings, single_instance,
+};
 
 use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 
 /// One instance per logged-on session.
 const INSTANCE_NAME: &str = "altoggle-single-instance";
+
+/// Shortest gap between two reads of the IME state.
+///
+/// `session`'s timer already ticks at about this rate, but `after_message` runs
+/// on *every* message — tray mouse-moves, every keystroke in the settings
+/// window — and `ime::read_open_status` is a `SendMessageTimeout` into another
+/// process. Without this the dialog would feel sticky to type in.
+const POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 /// Seconds after which to quit on our own, from `--exit-after=<seconds>`.
 ///
@@ -128,7 +140,12 @@ fn main() {
 
     // Without a tray icon there would be no way to quit a release build, which
     // has no console and so no Ctrl+C.
-    let tray = match Tray::new("altoggle", autostart::is_enabled()) {
+    let tray = match Tray::new(
+        "altoggle",
+        autostart::is_enabled(),
+        icons::detect_theme(),
+        icons::glyph_for(ime::read_open_status()),
+    ) {
         Ok(t) => t,
         Err(e) => {
             hooks.shutdown();
@@ -158,6 +175,7 @@ fn main() {
     // What the hook thread is running, so the dialog opens showing the values
     // that are actually in effect rather than re-reading the file.
     let mut current = settings;
+    let mut last_poll = Instant::now();
     let result = session::run(|| {
         for command in tray.poll() {
             match command {
@@ -172,6 +190,18 @@ fn main() {
         for applied in dialog::poll() {
             current = applied;
             hooks.set_config(applied.runtime());
+        }
+        // The IME can be switched by things that are none of our business — the
+        // 半角/全角 key, the IME's own indicator, another app — so the icon
+        // follows what the IME reports rather than what we last asked for. This
+        // has to happen here and not in a hook callback: `read_open_status`
+        // blocks on the foreground window's message loop.
+        if last_poll.elapsed() >= POLL_INTERVAL {
+            last_poll = Instant::now();
+            tray.set_state(
+                icons::detect_theme(),
+                icons::glyph_for(ime::read_open_status()),
+            );
         }
     });
     if let Err(e) = result {

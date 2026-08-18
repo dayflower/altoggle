@@ -7,6 +7,13 @@
 //! Receiving `WM_WTSSESSION_CHANGE` needs a window, so this creates a
 //! message-only one (parented to `HWND_MESSAGE`): it never appears on screen,
 //! never appears in the taskbar, and receives no broadcast messages.
+//!
+//! That last property is why the window also carries a timer. `GetMessageW`
+//! blocks, so without one `after_message` would only run when something else
+//! happened to arrive, and the tray icon needs a heartbeat to read the IME on.
+//! A broadcast would have served for the light/dark theme — Windows sends
+//! `WM_SETTINGCHANGE` with `"ImmersiveColorSet"` — but it does not reach an
+//! `HWND_MESSAGE` window, so that is polled on the same tick.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -18,7 +25,8 @@ use windows_sys::Win32::System::RemoteDesktop::{
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, HWND_MESSAGE,
-    MSG, PostThreadMessageW, RegisterClassW, TranslateMessage, WNDCLASSW, WM_DESTROY, WM_QUIT,
+    KillTimer, MSG, PostThreadMessageW, RegisterClassW, SetTimer, TranslateMessage, WNDCLASSW,
+    WM_DESTROY, WM_QUIT, WM_TIMER,
 };
 
 use crate::{dialog, hook, log, wide};
@@ -31,6 +39,17 @@ const WTS_CONSOLE_CONNECT: u32 = 0x1;
 const WTS_REMOTE_CONNECT: u32 = 0x3;
 const WTS_SESSION_LOGON: u32 = 0x5;
 const WTS_SESSION_UNLOCK: u32 = 0x8;
+
+/// Timer id for the heartbeat. Only one timer exists on this window, so the
+/// value is arbitrary; it just has to be non-zero.
+const TICK_TIMER: usize = 1;
+
+/// How often to wake the loop, in milliseconds.
+///
+/// This is the worst-case lag between the IME changing and the tray icon saying
+/// so. Fast enough that pressing a trigger key feels answered, slow enough that
+/// the `SendMessageTimeout` behind it is not worth thinking about.
+const TICK_MS: u32 = 400;
 
 static MAIN_TID: AtomicU32 = AtomicU32::new(0);
 
@@ -75,6 +94,10 @@ unsafe extern "system" fn wnd_proc(
             }
             0
         }
+        // Deliberately empty. The tick exists to wake `GetMessageW` so that the
+        // loop's `after_message` runs; the work itself belongs to the caller,
+        // which is the only thing that knows about the tray.
+        WM_TIMER => 0,
         WM_DESTROY => 0,
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
@@ -126,6 +149,13 @@ pub fn run(mut after_message: impl FnMut()) -> Result<(), String> {
         log::line("WTSRegisterSessionNotification failed: session changes will not be tracked");
     }
 
+    // Also not fatal, for the same reason: a tray icon that stops following the
+    // IME is a nuisance, and taking the app down over it would cost the user
+    // the ability to type.
+    if unsafe { SetTimer(hwnd, TICK_TIMER, TICK_MS, None) } == 0 {
+        log::line("SetTimer failed: the tray icon will not follow the IME");
+    }
+
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
         // The settings window is modeless and shares this loop, so Tab, Esc,
@@ -147,6 +177,7 @@ pub fn run(mut after_message: impl FnMut()) -> Result<(), String> {
     // still be alive here, holding a font and its state.
     dialog::close();
     unsafe {
+        KillTimer(hwnd, TICK_TIMER);
         WTSUnRegisterSessionNotification(hwnd);
         DestroyWindow(hwnd);
     }

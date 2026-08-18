@@ -3,6 +3,7 @@
 pub mod autostart;
 pub mod dialog;
 pub mod hook;
+pub mod icons;
 pub mod ime;
 pub mod inject;
 pub mod keys;
