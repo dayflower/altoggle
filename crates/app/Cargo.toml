@@ -2,6 +2,11 @@
 name = "altoggle-app"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+readme.workspace = true
 license.workspace = true
 publish.workspace = true
 
@@ -10,7 +15,10 @@ name = "altoggle"
 path = "src/main.rs"
 
 [dependencies]
-altoggle-core = { version = "0.1.0", path = "../core" }
+# No `version` requirement: nothing here is published, so it would be a third
+# copy of the number in Cargo.toml and app.rc, and a stale one refuses to
+# resolve at the exact moment you bump the other two.
+altoggle-core = { path = "../core" }
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
