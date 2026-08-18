@@ -22,8 +22,10 @@ once is allowed and leaves the app doing nothing.
 ## Layout
 
 ```
-crates/core   State machine only. no_std, no windows-sys, tests run on any OS.
-crates/app    Win32 adapter, the app, and the verification tools.
+crates/core     State machine only. no_std, no windows-sys, tests run on any OS.
+crates/app      Win32 adapter, the app, and the verification tools.
+crates/icongen  design/*.svg -> the icons crates/app embeds. Run by hand, and
+                outside default-members so no ordinary build touches it.
 ```
 
 **Keeping `core` OS-independent is the point, not an aesthetic.** Every bug worth
@@ -98,7 +100,7 @@ user may be typing Japanese with it right now.
 ## Commands
 
 ```bash
-cargo test                    # 47 tests: 22 in core, 20 in settings, the rest in app
+cargo test                    # 49 tests: 22 in core, 20 in settings, the rest in app
 cargo clippy --all-targets    # expected to be clean
 cargo build --release         # the only build that reflects the real deployment
 ```
@@ -168,6 +170,54 @@ for common controls v6 and per-monitor v2 DPI. **It applies to all four binaries
 and changes DPI awareness process-wide**, the tray icon included — a manifest is
 per crate, not per target.
 
+The same `build.rs` also compiles `crates/app/app.rc` (`embed-resource`), which
+gives the executable its icon. Two consequences and one rule:
+
+- the resource is per crate too, so the probes carry altoggle's icon
+- **the build now needs `rc.exe` from the Windows SDK.** A toolchain with
+  `link.exe` but no SDK resource compiler fails here and nowhere else. The
+  failure is deliberately not swallowed
+- **`app.rc` must never gain a manifest.** `embed-manifest` already supplies
+  one, and two `RT_MANIFEST` resources produce an executable Windows refuses to
+  start. Combining the two crates is safe only while the `.rc` stays a single
+  `ICON` line
+
+## The tray icon
+
+Six pictures: black or white (to contrast with the taskbar) times a Latin **a**
+(IME off), a hiragana **あ** (IME on) and an asterisk (cannot tell).
+
+`design/*.svg` and `design/appicon.png` are the masters. `crates/icongen` turns
+them into `crates/app/assets/*.png` and `appicon.ico`, which are committed and
+`include_bytes!`d. Run it by hand after changing the artwork:
+
+```bash
+cargo run -p altoggle-icongen
+```
+
+It is a workspace member but **not** in `default-members`, so `cargo build`,
+`cargo test` and `cargo clippy --all-targets` never touch it. That is the point:
+the app embeds finished pixels, and neither it nor the machine building it
+should need an SVG rasteriser.
+
+Three things that are only true for a reason:
+
+- **The IME read cannot live in a hook callback.** `ime::read_open_status` is a
+  `SendMessageTimeout`, and the only foreground-change signal the app has,
+  `hook::foreground_proc`, runs on the hook thread against the 300ms budget. So
+  `main`'s `after_message` polls instead, woken by a timer on `session`'s window
+- **`WM_SETTINGCHANGE` never arrives**, so the light/dark theme is polled on the
+  same tick. Windows broadcasts it with `"ImmersiveColorSet"`, but `session`'s
+  window is parented to `HWND_MESSAGE` and gets no broadcasts. Reading
+  `SystemUsesLightTheme` costs a cached-hive lookup and needs no second window
+- **An unreadable IME gets its own picture, not the Latin one.** `None` from
+  `read_open_status` means the application did not answer at all, which is not
+  the same as "off"; the asterisk artwork also drops the direction arrow so the
+  three states stay distinguishable at 32 pixels
+
+`Tray::set_state` returns early when nothing changed. That is load-bearing: the
+poll runs several times a second and `set_icon` is a `Shell_NotifyIcon`.
+
 ## Facts established by measurement
 
 These came from real hardware. Do not re-derive them, and do not "fix" code that
@@ -232,8 +282,26 @@ looks wrong against the documentation but right against this list.
   the callback
 - AltGr's phantom left Ctrl does **not** appear on a plain US layout. It is a
   US-International problem only
-- IMM32 read-back returns nothing for some UWP and Electron apps. That is not a
-  failure; judge IME switching by whether Japanese actually types
+- IMM32 read-back returns nothing for some Electron apps. That is not a failure;
+  judge IME switching by whether Japanese actually types
+- **The foreground window is the wrong thing to ask, and it does not decline.**
+  It reports "closed" with full confidence, which is worse than silence: there is
+  no way to tell it from a genuine off, so the symptom is a stuck "a" rather than
+  the asterisk. Two modern app shapes were measured doing this, and
+  `ime::input_window` exists to handle both:
+  - a **Store app**: `GetForegroundWindow` returns an `ApplicationFrameWindow`
+    owned by ApplicationFrameHost.exe, a shell process hosting only the frame.
+    The app itself is a `Windows.UI.Core.CoreWindow` child, in its own process.
+    Over a minute of toggling the frame said closed on every sample while the
+    `CoreWindow` tracked every switch
+  - **Windows 11 Notepad** (WinUI 3): one process, but the top-level `Notepad`
+    window and the `RichEditD2DPT` control holding the focus do not answer alike.
+    Same measurement: the top-level said closed throughout, the focus window
+    followed every switch
+- **`GetGUIThreadInfo(...).hwndFocus` is the general answer**, and the CoreWindow
+  hop is only what gets you into the right process first. Ordinary windows are
+  their own focus window's answer, so the same path serves all three cases and
+  none of them is a special case in the code
 
 **One loose end, deliberately not chased:** PowerShell *may* have shown its
 context menu on a swallowed Menu press. The observer was unsure and it was not
@@ -260,8 +328,7 @@ reaches the state machine only by `PostThreadMessage` → message loop →
 window procedure leaves committed settings on an outbox that `main` drains into
 `HookThread::set_config`, in the same place it drains the tray. Keep it that way.
 
-Also undecided, none of them load-bearing yet: showing IME state on the tray
-icon, an exclusion list for games and remote-desktop clients, a dark-mode title
-bar and controls for the dialog, and the menu-bar underline VS Code draws on Alt
-down, which option A cannot suppress because it passes Alt down through
-untouched.
+Also undecided, none of them load-bearing yet: an exclusion list for games and
+remote-desktop clients, a dark-mode title bar and controls for the dialog, and
+the menu-bar underline VS Code draws on Alt down, which option A cannot suppress
+because it passes Alt down through untouched.
