@@ -73,16 +73,24 @@ pub struct Config {
 /// who wants one direction and not the other should not have to invent a key
 /// for the other.
 pub const VK_NONE: u16 = 0;
-/// `VK_LMENU`
-pub const VK_LMENU: u16 = 0xA4;
-/// `VK_RMENU`
-pub const VK_RMENU: u16 = 0xA5;
 
 impl Default for Config {
+    /// Both triggers off, at the measured threshold.
+    ///
+    /// Inert on purpose. This answers "a `Config` nobody has configured", and
+    /// every use of it is a placeholder that a real config overwrites before an
+    /// event can reach the machine. Firing nothing in the meantime is the safe
+    /// direction for that gap to fail in.
+    ///
+    /// The default a *user* meets is a different question, answered by
+    /// `settings::Settings::default()` in the app crate: left and right Alt.
+    /// Which keys trigger is the app's policy and needs Windows virtual keys to
+    /// say it, which is exactly what this crate does not have. The threshold is
+    /// a property of solo-press detection itself, so it does live here.
     fn default() -> Self {
         Self {
-            left_trigger: VK_LMENU,
-            right_trigger: VK_RMENU,
+            left_trigger: VK_NONE,
+            right_trigger: VK_NONE,
             threshold_ms: 400,
         }
     }
@@ -229,13 +237,29 @@ impl Machine {
 mod tests {
     use super::*;
 
-    fn machine() -> Machine {
-        Machine::new(Config::default())
-    }
-
+    /// The trigger keys the app happens to default to, as a fixture.
+    ///
+    /// The machine has no opinion about Alt; these tests are about "some
+    /// trigger key", so the virtual keys belong here rather than in the crate.
+    const VK_LMENU: u16 = 0xA4;
+    const VK_RMENU: u16 = 0xA5;
     /// An arbitrary non-trigger key (`X`).
     const VK_X: u16 = 0x58;
     const VK_LCONTROL: u16 = 0xA2;
+
+    /// `Config::default()` fires nothing, so anything watching a press needs a
+    /// config that has triggers in it.
+    fn alt_config() -> Config {
+        Config {
+            left_trigger: VK_LMENU,
+            right_trigger: VK_RMENU,
+            ..Config::default()
+        }
+    }
+
+    fn machine() -> Machine {
+        Machine::new(alt_config())
+    }
 
     #[test]
     fn solo_press_of_right_alt_fires() {
@@ -408,7 +432,7 @@ mod tests {
 
         m.set_config(Config {
             threshold_ms: 200,
-            ..Config::default()
+            ..alt_config()
         });
 
         m.on_event(Event::KeyDown(VK_RMENU), 1000);
@@ -477,7 +501,9 @@ mod tests {
     fn changing_the_config_discards_the_held_state() {
         let mut m = machine();
         m.on_event(Event::KeyDown(VK_RMENU), 0);
-        m.set_config(Config::default());
+        // The same triggers, so what discards the press is `set_config` itself
+        // and not the key ceasing to be a trigger.
+        m.set_config(alt_config());
         // The dangling up event must not fire.
         assert_eq!(m.on_event(Event::KeyUp(VK_RMENU), 50), Action::None);
     }

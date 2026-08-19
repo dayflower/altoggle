@@ -12,78 +12,94 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    VK_APPS, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
+};
 
 use altoggle_core::{Config, VK_NONE};
 
-/// A key that can act as a trigger.
+/// Generates, from the single table below:
 ///
-/// Deliberately not "any key": a solo press has to be robbed of its usual side
-/// effect, and that only works for keys whose side effect we have measured. Alt
-/// opens the menu bar and Win opens the start menu; both are suppressed by
-/// injecting a dummy key before the up, which is what makes them eligible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TriggerKey {
-    LeftAlt,
-    RightAlt,
-    LeftCtrl,
-    RightCtrl,
-    LeftShift,
-    RightShift,
-    LeftWin,
-    RightWin,
-    /// The context-menu key, `VK_APPS`.
+/// - the `TriggerKey` enum
+/// - `TriggerKey::ALL`, in table order, with its length counted from the table
+/// - `TriggerKey::vk`
+/// - `TriggerKey::name`
+///
+/// The only macro in this repository, and it is here because those four lists
+/// drift apart silently. `vk` and `name` are exhaustive matches, so a variant
+/// missing from either is a compile error, but `ALL` was a hand-written array:
+/// a variant left out of it still compiled, and since every test iterates `ALL`
+/// not one of them would have failed. The user would have found out instead by
+/// the key being absent from the dialog, and by the config file naming it being
+/// rejected and falling back to defaults wholesale.
+macro_rules! triggers {
+    (
+        $(#[$enum_meta:meta])*
+        pub enum TriggerKey {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident => $vk:expr, $name:literal;
+            )*
+        }
+    ) => {
+        $(#[$enum_meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum TriggerKey {
+            $(
+                $(#[$variant_meta])*
+                $variant,
+            )*
+        }
+
+        impl TriggerKey {
+            /// Every trigger, in the order the config file and the settings
+            /// dialog present them.
+            pub const ALL: [TriggerKey; [$(TriggerKey::$variant),*].len()] =
+                [$(TriggerKey::$variant),*];
+
+            pub fn vk(self) -> u16 {
+                match self {
+                    $(TriggerKey::$variant => $vk,)*
+                }
+            }
+
+            /// The name used in the config file, the dialog and the probes.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(TriggerKey::$variant => $name,)*
+                }
+            }
+        }
+    };
+}
+
+triggers! {
+    /// A key that can act as a trigger.
     ///
-    /// **Not Alt.** Win32 calls Alt `VK_MENU`, so "Menu" is ambiguous in code;
-    /// this is the key with the menu glyph on it, next to right Ctrl. It is also
-    /// the only trigger that is not a modifier, and the only one with no left or
-    /// right twin.
-    Menu,
+    /// Deliberately not "any key": a solo press has to be robbed of its usual side
+    /// effect, and that only works for keys whose side effect we have measured. Alt
+    /// opens the menu bar and Win opens the start menu; both are suppressed by
+    /// injecting a dummy key before the up, which is what makes them eligible.
+    pub enum TriggerKey {
+        LeftAlt    => VK_LMENU,    "LeftAlt";
+        RightAlt   => VK_RMENU,    "RightAlt";
+        LeftCtrl   => VK_LCONTROL, "LeftCtrl";
+        RightCtrl  => VK_RCONTROL, "RightCtrl";
+        LeftShift  => VK_LSHIFT,   "LeftShift";
+        RightShift => VK_RSHIFT,   "RightShift";
+        LeftWin    => VK_LWIN,     "LeftWin";
+        RightWin   => VK_RWIN,     "RightWin";
+        /// The context-menu key, `VK_APPS`.
+        ///
+        /// **Not Alt.** Win32 calls Alt `VK_MENU`, so "Menu" is ambiguous in code;
+        /// this is the key with the menu glyph on it, next to right Ctrl. It is also
+        /// the only trigger that is not a modifier, and the only one with no left or
+        /// right twin.
+        Menu       => VK_APPS,     "Menu";
+    }
 }
 
 impl TriggerKey {
-    /// Every trigger, in the order the config file and the settings dialog
-    /// present them.
-    pub const ALL: [TriggerKey; 9] = [
-        TriggerKey::LeftAlt,
-        TriggerKey::RightAlt,
-        TriggerKey::LeftCtrl,
-        TriggerKey::RightCtrl,
-        TriggerKey::LeftShift,
-        TriggerKey::RightShift,
-        TriggerKey::LeftWin,
-        TriggerKey::RightWin,
-        TriggerKey::Menu,
-    ];
-
-    pub fn vk(self) -> u16 {
-        match self {
-            TriggerKey::LeftAlt => 0xA4,
-            TriggerKey::RightAlt => 0xA5,
-            TriggerKey::LeftCtrl => 0xA2,
-            TriggerKey::RightCtrl => 0xA3,
-            TriggerKey::LeftShift => 0xA0,
-            TriggerKey::RightShift => 0xA1,
-            TriggerKey::LeftWin => 0x5B,
-            TriggerKey::RightWin => 0x5C,
-            TriggerKey::Menu => 0x5D, // VK_APPS
-        }
-    }
-
-    /// The name used in the config file, the dialog and the probes.
-    pub fn name(self) -> &'static str {
-        match self {
-            TriggerKey::LeftAlt => "LeftAlt",
-            TriggerKey::RightAlt => "RightAlt",
-            TriggerKey::LeftCtrl => "LeftCtrl",
-            TriggerKey::RightCtrl => "RightCtrl",
-            TriggerKey::LeftShift => "LeftShift",
-            TriggerKey::RightShift => "RightShift",
-            TriggerKey::LeftWin => "LeftWin",
-            TriggerKey::RightWin => "RightWin",
-            TriggerKey::Menu => "Menu",
-        }
-    }
-
     /// Parse a name, for the probes' command lines. Case-insensitive, because a
     /// command line is typed in a hurry; the config file stays strict.
     pub fn from_name(s: &str) -> Option<Self> {
@@ -173,11 +189,16 @@ mod trigger_slot {
 }
 
 impl Default for Settings {
+    /// What a user who has never opened the dialog gets.
+    ///
+    /// The triggers are the app's policy and are named here. The threshold is
+    /// not: it is a property of solo-press detection, so it comes from
+    /// `Config::default()` rather than being a second copy of the measured 400.
     fn default() -> Self {
         Self {
             left_trigger: Some(TriggerKey::LeftAlt),
             right_trigger: Some(TriggerKey::RightAlt),
-            threshold_ms: 400,
+            threshold_ms: Config::default().threshold_ms,
             dummy_vk: 0x07,
             show_ime_state: false,
         }

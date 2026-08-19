@@ -73,10 +73,12 @@ effect at the next start; there is no reload command. Trigger keys are named
 (`"LeftAlt"`), not numeric, because the dialog wants exactly that list for a
 dropdown.
 
-Trigger names live in `TriggerKey::name` and nowhere else. The config file reads
-them through the hand-written `settings::trigger_slot` serde module rather than
-a derive on the enum, so the file format cannot grow a second copy of every name
-and drift from what the dialog and the probes show.
+Trigger names live in the `triggers!` table at the top of `settings.rs` and
+nowhere else. That one table generates the `TriggerKey` enum, `ALL`, `vk` and
+`name`, so adding a trigger is a single row and there is no list left to forget.
+The config file reads the names through the hand-written `settings::trigger_slot`
+serde module rather than a derive on the enum, so the file format cannot grow a
+second copy of every name and drift from what the dialog and the probes show.
 
 The dummy key is hex everywhere — dialog, log, `--dummy`, and `config.toml`
 (`dummy_vk = 0x07`; TOML reads hex integers, and an older file's decimal still
