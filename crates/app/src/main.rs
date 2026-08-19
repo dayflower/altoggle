@@ -102,9 +102,10 @@ fn load_settings() -> settings::Settings {
 /// The tick would otherwise claim "starts with Windows" while silently launching
 /// some other build, which is exactly the kind of thing you discover months later.
 fn report_stale_autostart() {
-    let (Some(registered), Ok(current)) =
-        (autostart::registered_command(), autostart::command_for_this_exe())
-    else {
+    let (Some(registered), Ok(current)) = (
+        autostart::registered_command(),
+        autostart::command_for_this_exe(),
+    ) else {
         return;
     };
     if registered != current {

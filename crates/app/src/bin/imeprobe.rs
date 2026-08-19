@@ -195,10 +195,7 @@ fn main() {
 
     println!("imeprobe - verifying IME switching");
     println!("{}", args.describe());
-    println!(
-        "injection: {}",
-        if args.split { "split" } else { "batch" }
-    );
+    println!("injection: {}", if args.split { "split" } else { "batch" });
     if args.dry_run {
         println!("--dry-run: no hook installed, nothing intercepted.");
         return;

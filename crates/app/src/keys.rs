@@ -25,7 +25,7 @@ pub fn foreign_modifier_held(trigger_vk: u16) -> bool {
         VK_LWIN,
         VK_RWIN,
     ];
-    MODIFIERS.iter().any(|&vk| {
-        vk != trigger_vk && unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 }
-    })
+    MODIFIERS
+        .iter()
+        .any(|&vk| vk != trigger_vk && unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 })
 }
