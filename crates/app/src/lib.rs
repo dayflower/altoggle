@@ -2,6 +2,7 @@
 
 pub mod autostart;
 pub mod dialog;
+pub mod dispatch;
 pub mod hook;
 pub mod icons;
 pub mod ime;
@@ -9,6 +10,7 @@ pub mod inject;
 pub mod keys;
 pub mod log;
 pub mod probe_args;
+pub mod probe_log;
 pub mod registry;
 pub mod session;
 pub mod settings;

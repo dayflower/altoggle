@@ -22,17 +22,15 @@
 //!   --dry-run: print what would be used and install no hook
 
 use std::cell::RefCell;
-use std::io::{BufWriter, Write};
 use std::ptr::null_mut;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{Sender, channel};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use altoggle_app::dispatch::{dispatch, is_button_down, now_ms, start_clock};
 use altoggle_app::ime;
 use altoggle_app::inject::{self, key_input};
-use altoggle_app::keys::foreign_modifier_held;
 use altoggle_app::probe_args::IMEPROBE;
+use altoggle_app::probe_log;
 use altoggle_core::{Action, Config, Event, Machine, Side};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -42,11 +40,9 @@ use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_UP, MSG,
     PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_QUIT, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
+    WH_MOUSE_LL, WM_QUIT,
 };
 
-static TX: OnceLock<Sender<Msg>> = OnceLock::new();
-static START: OnceLock<Instant> = OnceLock::new();
 static MAIN_TID: AtomicU32 = AtomicU32::new(0);
 static DUMMY_VK: AtomicU32 = AtomicU32::new(0x07);
 static SPLIT: AtomicBool = AtomicBool::new(false);
@@ -56,30 +52,6 @@ thread_local! {
     /// (that is, the message loop thread). Both the keyboard and mouse hooks are
     /// installed on the same thread, so thread-local state is enough.
     static MACHINE: RefCell<Machine> = RefCell::new(Machine::new(Config::default()));
-}
-
-enum Msg {
-    Line(String),
-    Fired {
-        at: f64,
-        side: Side,
-        sent: u32,
-        expected: u32,
-    },
-    Stop,
-}
-
-fn now_ms() -> u64 {
-    START
-        .get()
-        .map(|s| s.elapsed().as_millis() as u64)
-        .unwrap_or(0)
-}
-
-fn log(s: String) {
-    if let Some(tx) = TX.get() {
-        let _ = tx.send(Msg::Line(s));
-    }
 }
 
 /// Injection on fire. Returns (events sent, events expected).
@@ -120,33 +92,32 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     let is_up = k.flags & LLKHF_UP != 0;
     let t = now_ms();
 
-    let action = MACHINE.with_borrow_mut(|m| {
-        if is_up {
-            m.on_event(Event::KeyUp(vk), t)
-        } else {
-            let a = m.on_event(Event::KeyDown(vk), t);
-            let cfg = *m.config();
-            if (vk == cfg.left_trigger || vk == cfg.right_trigger) && foreign_modifier_held(vk) {
-                m.on_event(Event::ForeignKeyHeld, t);
-            }
-            a
-        }
-    });
+    let (action, _) = MACHINE.with_borrow_mut(|m| dispatch(m, vk, is_up, t));
 
     if let Action::Fire(side) = action {
         // Fire only follows a KeyUp of the held trigger, so `vk` is that trigger.
         let (sent, expected) = fire(side, vk);
-        if let Some(tx) = TX.get() {
-            let _ = tx.send(Msg::Fired {
-                at: t as f64 / 1000.0,
-                side,
-                sent,
-                expected,
-            });
-        }
+        let at = t as f64 / 1000.0;
+        probe_log::deferred(move || {
+            // IMM32 is read only here, never from the hook callback.
+            // Give the switch a moment to take effect.
+            std::thread::sleep(Duration::from_millis(150));
+            let status = match ime::read_open_status() {
+                Some(true) => "ON",
+                Some(false) => "OFF",
+                None => "?(unreadable)",
+            };
+            let what = match side {
+                Side::Right => "injected IME_ON",
+                Side::Left => "injected IME_OFF",
+            };
+            format!(
+                "{at:>8.3}  FIRE {side:?}  {what}  SendInput={sent}/{expected}  -> read back: IME={status}"
+            )
+        });
         if sent != expected {
             inject::release_stuck_keys();
-            log("!!! injection failed, modifiers released".into());
+            probe_log::line("!!! injection failed, modifiers released");
         }
         return 1; // block the real up
     }
@@ -155,12 +126,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32
-        && matches!(
-            wparam as u32,
-            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
-        )
-    {
+    if code == HC_ACTION as i32 && is_button_down(wparam) {
         MACHINE.with_borrow_mut(|m| m.on_event(Event::MouseButton, now_ms()));
     }
     unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
@@ -184,7 +150,7 @@ fn main() {
     SPLIT.store(args.split, Ordering::Relaxed);
     MACHINE.with_borrow_mut(|m| m.set_config(args.config()));
 
-    START.set(Instant::now()).ok();
+    start_clock();
     MAIN_TID.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
 
     let prev = std::panic::take_hook();
@@ -211,44 +177,7 @@ fn main() {
     );
     println!("{:-<100}", "");
 
-    let (tx, rx) = channel::<Msg>();
-    TX.set(tx).ok();
-    let writer = std::thread::spawn(move || {
-        let mut out = BufWriter::new(std::io::stdout());
-        while let Ok(msg) = rx.recv() {
-            match msg {
-                Msg::Line(s) => {
-                    let _ = writeln!(out, "{s}");
-                }
-                Msg::Fired {
-                    at,
-                    side,
-                    sent,
-                    expected,
-                } => {
-                    // IMM32 is read only here, never from the hook callback.
-                    // Give the switch a moment to take effect.
-                    std::thread::sleep(Duration::from_millis(150));
-                    let status = match ime::read_open_status() {
-                        Some(true) => "ON",
-                        Some(false) => "OFF",
-                        None => "?(unreadable)",
-                    };
-                    let what = match side {
-                        Side::Right => "injected IME_ON",
-                        Side::Left => "injected IME_OFF",
-                    };
-                    let _ = writeln!(
-                        out,
-                        "{at:>8.3}  FIRE {side:?}  {what}  SendInput={sent}/{expected}  -> read back: IME={status}",
-                    );
-                }
-                Msg::Stop => break,
-            }
-            let _ = out.flush();
-        }
-    });
-
+    probe_log::init();
     unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), 1) };
 
     let hmod = unsafe { GetModuleHandleW(null_mut()) };
@@ -280,9 +209,6 @@ fn main() {
         UnhookWindowsHookEx(ms_hook);
     }
     inject::release_stuck_keys();
-    if let Some(tx) = TX.get() {
-        let _ = tx.send(Msg::Stop);
-    }
-    let _ = writer.join();
+    probe_log::shutdown();
     println!("Stopped (modifiers released).");
 }
