@@ -1,0 +1,74 @@
+# Runs the four commands AGENTS.md documents, on a machine that is not the
+# developer's. It exists to stop a formatting drift, a clippy warning, a failing
+# test or a release build that no longer links from reaching main -- not to test
+# what the app does. The interesting behaviour here (a suppressed Alt up, the
+# dummy-key injection, the IME read-back) is only reachable from real hardware
+# with a real IME, and no hosted runner stands in for that. A green run means
+# the code compiles, lints and passes its unit tests, and says nothing about
+# behaviour on a keyboard.
+#
+# windows-latest, and not a matrix: crates/app pulls windows-sys
+# unconditionally, and its build.rs needs rc.exe from the Windows SDK to embed
+# the icon. crates/core is OS independent, but it is reached through the same
+# `cargo test` either way.
+#
+# One job rather than four, because compiling the dependency tree is most of
+# the wall clock on a Windows runner and this way it happens once.
+#
+# `cargo build --release` is included even though it is the slow step: it is the
+# only build that reflects the real deployment (lto, codegen-units = 1), and
+# build.rs is the one place a missing resource compiler fails.
+#
+# What this deliberately does not do: release or tag automation (scripts/
+# release.ps1 stays a hand-run step), an MSRV check, an icongen build, and
+# running altoggle itself -- it installs a low-level keyboard hook and blocks
+# real Alt up events, which is not a thing to do on a runner.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A re-push supersedes the run it just invalidated.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, test, release build
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # stable, deliberately not pinned: this checks the code against the
+      # compiler people actually have. The rust-version floor in Cargo.toml is a
+      # separate claim, and one nothing here tests.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Ordered cheapest-failure first: formatting before compilation, clippy
+      # before the release build.
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # -D warnings is what enforces "expected to be clean". Without it clippy
+      # reports and still exits zero.
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo build --release
+        run: cargo build --release

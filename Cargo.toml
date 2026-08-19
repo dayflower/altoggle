@@ -10,8 +10,9 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# The floor that edition 2024 and resolver 3 impose. Nothing verifies it â€” there
-# is no CI â€” so treat it as the honest minimum rather than a tested one.
+# The floor that edition 2024 and resolver 3 impose. CI builds on stable and
+# checks nothing below it, so treat it as the honest minimum rather than a
+# tested one.
 rust-version = "1.85"
 authors = ["dayflower"]
 description = "Switches the Windows IME from a solo press of a modifier key"
@@ -20,14 +21,14 @@ readme = "README.md"
 license = "MIT"
 publish = false
 
-# The release profile is what gets distributed, so it is worth tuning â€” with one
+# The release profile is what gets distributed, so it is worth tuning — with one
 # knob that must not be touched.
 #
 # `panic` stays "unwind", and it is left unset here rather than spelled out so
 # that setting it looks like the change it is. Both a normal exit and a panic
 # inject an up event for every modifier the app might be holding
 # (inject::RELEASED_ON_FAILURE). `panic = "abort"` skips that unwinding, and a
-# suppressed Alt â€” or worse a Win â€” left logically down turns every later
+# suppressed Alt — or worse a Win — left logically down turns every later
 # keystroke into a chord, on a machine whose keyboard the user still needs. This
 # is a correctness setting wearing a size-and-speed setting's clothes.
 [profile.release]
