@@ -98,7 +98,7 @@ user may be typing Japanese with it right now.
 ## Commands
 
 ```bash
-cargo test                    # 51 tests: 22 in core, 21 in settings, the rest in app
+cargo test                    # 53 tests: 22 in core, 21 in settings, the rest in app
 cargo clippy --all-targets    # expected to be clean
 cargo build --release         # the only build that reflects the real deployment
 cargo run -p altoggle-icongen # by hand, only after changing design/
