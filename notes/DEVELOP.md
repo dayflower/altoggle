@@ -275,13 +275,28 @@ destination is a winget or scoop manifest, which is why the zip is named for its
 version and target triple and why the SHA256 is published with it: those are the
 two things such a manifest asks for.
 
-1. Bump `version` in the root `Cargo.toml` **and in `crates/app/app.rc`**
-2. `cargo test` — the drift test in `crates/app/src/lib.rs` fails if you did only
-   one of those two
-3. `.\scripts\release.ps1` — builds `--bin altoggle` alone, stages
-   `altoggle.exe`, `README.md` and `LICENSE` into `dist\`, zips, and prints the
-   SHA256 and the archive's contents
-4. Tag `v<version>`, attach the zip, paste the SHA256
+1. `.\scripts\bump.ps1 <major|minor|patch|X.Y.Z>` — resolves the next version
+   from the current one, writes it to the root `Cargo.toml` and to
+   `crates/app/app.rc`, runs `cargo test`, commits on `release/v<version>`,
+   pushes, and opens the pull request. `-DryRun` runs every check and prints
+   every change without touching a file or a branch
+2. Merge that pull request
+3. `.github/workflows/release.yml` notices the version change on `main`, runs
+   the tests, calls `scripts/release.ps1`, and publishes `v<version>` with the
+   zip attached and its SHA256 in the notes
+
+**The version number is typed once.** It used to have three homes — the root
+`Cargo.toml`, `crates/app/app.rc`, and the tag — and only the first two were
+tied together, by the drift test in `crates/app/src/lib.rs` that fails if you
+bump one and not the other. The tag was a third copy nobody checked. Now
+`bump.ps1` writes the two files and CI derives the tag from `Cargo.toml` at the
+commit it is releasing, so a tag disagreeing with the binary is unreachable
+rather than caught.
+
+`scripts/release.ps1` stays worth running by hand when you want to see what
+would ship. It is the same script CI calls, so a clean local run is the same
+packaging — that is the point of CI calling it rather than assembling the zip
+itself.
 
 **Only `altoggle.exe` ships.** A `keylog.exe` sitting next to a tray app in a
 downloaded zip is an antivirus incident and a trust problem in one. The script
@@ -298,21 +313,27 @@ network, two writes, unelevated). Those claims are load-bearing: if any of them
 stops being true, that paragraph changes with it.
 
 Not built, and listed here so each stays a decision rather than an oversight: a
-signing certificate, an installer, and arm64. Releasing itself is not automated
-either; CI checks the tree, not the tag. The largest gap the current state
+signing certificate, an installer, and arm64. Pre-release versions are refused
+by `bump.ps1` rather than unimplemented — `app.rc`'s `FILEVERSION` takes four
+numbers and a hyphen is not one of them. The largest gap the current state
 leaves is that every diagnostic goes to `OutputDebugStringW` only, so a release
 build that refuses to start does so in complete silence — worth fixing the first
 time a user reports "nothing happens".
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push to `main` and every pull request,
-and it runs exactly the four commands in the AGENTS.md command block — fmt,
-clippy, test, release build — as four steps of one job, with `-D warnings`
-added to clippy because otherwise it reports and still exits zero. One job
-because compiling the dependency tree is most of the wall clock on a Windows
-runner, and this way it happens once; that order because it fails
-cheapest-first.
+Two workflows. `ci.yml` checks the tree on every pull request; `release.yml`
+publishes when the version on `main` changes. They share a runner image and
+nothing else.
+
+### ci.yml
+
+It runs on every push to `main` and every pull request, and it runs exactly the
+four commands in the AGENTS.md command block — fmt, clippy, test, release build
+— as four steps of one job, with `-D warnings` added to clippy because otherwise
+it reports and still exits zero. One job because compiling the dependency tree
+is most of the wall clock on a Windows runner, and this way it happens once;
+that order because it fails cheapest-first.
 
 `windows-latest`, and no matrix. `crates/app` pulls `windows-sys`
 unconditionally and its `build.rs` needs `rc.exe` from the Windows SDK, so an
@@ -332,11 +353,35 @@ established by measurement](#facts-established-by-measurement) stays outside
 CI's reach — as does the whole reason the probes exist. The app itself is never
 launched there, and should not be: it blocks real Alt up events.
 
-Considered and left out, each a decision rather than an oversight: release and
-tag automation (`scripts/release.ps1` stays a hand-run step, and signing the
-result is unsolved anyway), an MSRV job, a `cargo check -p altoggle-icongen`
-that would drag an SVG toolchain into CI for a crate no build touches, and a
-second job running `crates/core` on ubuntu to prove it is OS independent.
+Considered and left out, each a decision rather than an oversight: an MSRV job,
+a `cargo check -p altoggle-icongen` that would drag an SVG toolchain into CI for
+a crate no build touches, and a second job running `crates/core` on ubuntu to
+prove it is OS independent.
+
+### release.yml
+
+Triggered by a push to `main` that touches `Cargo.toml`, and then guarded by two
+conditions that both have to hold: the version differs from the one at `HEAD^`
+(so an ordinary dependency bump is a no-op, and so adding the workflow does not
+itself release whatever version is current), and no release exists for it yet
+(so a re-run publishes nothing twice). Everything after the guard is skipped by
+`if:` rather than by a second job.
+
+It then runs `cargo test` — not a repeat of the pull request's run, because what
+is built here is the merge commit, and because the drift test is the claim the
+whole scheme rests on — calls `scripts/release.ps1` for the packaging, and hands
+the zip to `gh release create --target <sha>`.
+
+**The tag is created by that command, not pushed by a step.** It costs a
+lightweight tag rather than an annotated one, and buys back the failure mode
+where a pushed tag survives a failed publish. It also sidesteps the rule that a
+tag pushed with `GITHUB_TOKEN` starts no further workflow: there is no further
+workflow, because this one runs to the published release.
+
+What it guarantees is that the tag, the version resource in the exe, and
+`Cargo.toml` agree — all three come from one number that `scripts/bump.ps1`
+wrote once. What it does not do is sign anything, build an installer, or make
+the exe any less alarming to SmartScreen.
 
 ## Where things are heading
 
