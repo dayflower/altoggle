@@ -22,12 +22,9 @@
 use std::io::Cursor;
 
 use tray_icon::Icon;
-use windows_sys::Win32::Foundation::ERROR_SUCCESS;
-use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
-};
+use windows_sys::Win32::System::Registry::KEY_READ;
 
-use crate::wide;
+use crate::registry::Key;
 
 /// Every tray icon is this square. The shell asks for the real pixel size (the
 /// manifest makes the process per-monitor DPI aware), so anything else is the
@@ -102,29 +99,12 @@ pub fn detect_theme() -> Theme {
     }
 }
 
+/// `None` means the value could not be read, which `detect_theme` deliberately
+/// does not treat as `Some(false)`.
 fn light_taskbar() -> Option<bool> {
-    let subkey = wide(THEME_KEY);
-    let mut key: HKEY = std::ptr::null_mut();
-    let rc = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut key) };
-    if rc != ERROR_SUCCESS {
-        return None;
-    }
-
-    let name = wide(THEME_VALUE);
-    let mut value: u32 = 0;
-    let mut size = std::mem::size_of::<u32>() as u32;
-    let rc = unsafe {
-        RegQueryValueExW(
-            key,
-            name.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            &mut value as *mut u32 as *mut u8,
-            &mut size,
-        )
-    };
-    unsafe { RegCloseKey(key) };
-    (rc == ERROR_SUCCESS).then_some(value != 0)
+    Key::open_hkcu(THEME_KEY, KEY_READ)?
+        .dword(THEME_VALUE)
+        .map(|v| v != 0)
 }
 
 /// The six icons, decoded once.

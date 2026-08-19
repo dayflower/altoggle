@@ -35,7 +35,7 @@ use std::time::Instant;
 
 use altoggle_app::inject;
 use altoggle_app::keys::foreign_modifier_held;
-use altoggle_app::probe_args::{self, ProbeArgs};
+use altoggle_app::probe_args::ALTPROBE;
 use altoggle_core::{Action, Config, Event, Machine};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -173,10 +173,10 @@ unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
 // ---------------------------------------------------------------- main
 
 fn main() {
-    let args = match ProbeArgs::parse(90) {
+    let args = match ALTPROBE.parse() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("altprobe: {e}\n{}", probe_args::usage("altprobe"));
+            eprintln!("{}: {e}\n{}", ALTPROBE.name, ALTPROBE.usage());
             std::process::exit(2);
         }
     };
