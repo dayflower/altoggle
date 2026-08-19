@@ -201,15 +201,7 @@ if ($LASTEXITCODE -ne 0) { throw "git commit failed with exit code $LASTEXITCODE
 & git -C $root push --set-upstream origin $branch
 if ($LASTEXITCODE -ne 0) { throw "git push failed with exit code $LASTEXITCODE" }
 
-$body = @"
-Bumps the version to $next.
-
-Merging this cuts the release: release.yml sees the version change on main,
-runs the tests, builds altoggle.exe through scripts/release.ps1, and publishes
-$zipName as $tag with its SHA256 in the notes.
-
-No tag needs pushing by hand; CI derives it from Cargo.toml.
-"@
+$body = "Bumps the version to $next."
 
 # gh reads the repository from the working directory, so it gets one.
 Push-Location $root
