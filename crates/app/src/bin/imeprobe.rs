@@ -21,49 +21,30 @@
 //!              calls (the default batches them into one)
 //!   --dry-run: print what would be used and install no hook
 
-use std::cell::RefCell;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
-use altoggle_app::dispatch::{dispatch, is_button_down, now_ms, start_clock};
+use altoggle_app::dispatch::start_clock;
 use altoggle_app::ime;
 use altoggle_app::inject::{self, key_input};
+use altoggle_app::lowlevel::{self, Callbacks, Fire};
 use altoggle_app::probe_args::IMEPROBE;
-use altoggle_app::probe_log;
-use altoggle_core::{Action, Config, Event, Machine, Side};
+use altoggle_app::{probe_exit, probe_log};
+use altoggle_core::Side;
 
-use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_UP, MSG,
-    PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_QUIT,
+    DispatchMessageW, GetMessageW, MSG, TranslateMessage,
 };
 
-static MAIN_TID: AtomicU32 = AtomicU32::new(0);
-static DUMMY_VK: AtomicU32 = AtomicU32::new(0x07);
-static SPLIT: AtomicBool = AtomicBool::new(false);
-
-thread_local! {
-    /// A low-level hook callback runs on the thread that installed the hook
-    /// (that is, the message loop thread). Both the keyboard and mouse hooks are
-    /// installed on the same thread, so thread-local state is enough.
-    static MACHINE: RefCell<Machine> = RefCell::new(Machine::new(Config::default()));
-}
-
 /// Injection on fire. Returns (events sent, events expected).
-fn fire(side: Side, trigger_vk: u16) -> (u32, u32) {
-    let dummy = DUMMY_VK.load(Ordering::Relaxed) as u16;
+fn inject_for(dummy: u16, split: bool, side: Side, trigger_vk: u16) -> (u32, u32) {
     let ime_vk = match side {
         Side::Right => ime::VK_IME_ON,
         Side::Left => ime::VK_IME_OFF,
     };
 
     let suppression = inject::suppress(dummy, trigger_vk);
-    if SPLIT.load(Ordering::Relaxed) {
+    if split {
         let (a, expected) = inject::send_batch(&suppression);
         let b = ime::set_open(matches!(side, Side::Right));
         (a + b, expected + 2)
@@ -79,62 +60,37 @@ fn fire(side: Side, trigger_vk: u16) -> (u32, u32) {
     }
 }
 
-unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code != HC_ACTION as i32 {
-        return unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) };
+/// What a completed solo press does here: suppress, switch the IME, and report
+/// what the IME says afterwards.
+fn on_fire(dummy: u16, split: bool, f: Fire) {
+    let Fire {
+        side,
+        trigger_vk,
+        at,
+    } = f;
+    let (sent, expected) = inject_for(dummy, split, side, trigger_vk);
+    let at = at as f64 / 1000.0;
+    probe_log::deferred(move || {
+        // IMM32 is read only here, never from the hook callback.
+        // Give the switch a moment to take effect.
+        std::thread::sleep(Duration::from_millis(150));
+        let status = match ime::read_open_status() {
+            Some(true) => "ON",
+            Some(false) => "OFF",
+            None => "?(unreadable)",
+        };
+        let what = match side {
+            Side::Right => "injected IME_ON",
+            Side::Left => "injected IME_OFF",
+        };
+        format!(
+            "{at:>8.3}  FIRE {side:?}  {what}  SendInput={sent}/{expected}  -> read back: IME={status}"
+        )
+    });
+    if sent != expected {
+        inject::release_stuck_keys();
+        probe_log::line("!!! injection failed, modifiers released");
     }
-    let k = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-    if k.dwExtraInfo == inject::INJECT_TAG {
-        return unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) };
-    }
-
-    let vk = k.vkCode as u16;
-    let is_up = k.flags & LLKHF_UP != 0;
-    let t = now_ms();
-
-    let (action, _) = MACHINE.with_borrow_mut(|m| dispatch(m, vk, is_up, t));
-
-    if let Action::Fire(side) = action {
-        // Fire only follows a KeyUp of the held trigger, so `vk` is that trigger.
-        let (sent, expected) = fire(side, vk);
-        let at = t as f64 / 1000.0;
-        probe_log::deferred(move || {
-            // IMM32 is read only here, never from the hook callback.
-            // Give the switch a moment to take effect.
-            std::thread::sleep(Duration::from_millis(150));
-            let status = match ime::read_open_status() {
-                Some(true) => "ON",
-                Some(false) => "OFF",
-                None => "?(unreadable)",
-            };
-            let what = match side {
-                Side::Right => "injected IME_ON",
-                Side::Left => "injected IME_OFF",
-            };
-            format!(
-                "{at:>8.3}  FIRE {side:?}  {what}  SendInput={sent}/{expected}  -> read back: IME={status}"
-            )
-        });
-        if sent != expected {
-            inject::release_stuck_keys();
-            probe_log::line("!!! injection failed, modifiers released");
-        }
-        return 1; // block the real up
-    }
-
-    unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
-}
-
-unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 && is_button_down(wparam) {
-        MACHINE.with_borrow_mut(|m| m.on_event(Event::MouseButton, now_ms()));
-    }
-    unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
-}
-
-unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
-    unsafe { PostThreadMessageW(MAIN_TID.load(Ordering::Relaxed), WM_QUIT, 0, 0) };
-    1
 }
 
 fn main() {
@@ -146,12 +102,11 @@ fn main() {
         }
     };
     let auto_exit_secs = args.secs;
-    DUMMY_VK.store(args.dummy_vk as u32, Ordering::Relaxed);
-    SPLIT.store(args.split, Ordering::Relaxed);
-    MACHINE.with_borrow_mut(|m| m.set_config(args.config()));
+    let dummy = args.dummy_vk;
+    let split = args.split;
 
     start_clock();
-    MAIN_TID.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+    lowlevel::set_config(args.config());
 
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -161,7 +116,7 @@ fn main() {
 
     println!("imeprobe - verifying IME switching");
     println!("{}", args.describe());
-    println!("injection: {}", if args.split { "split" } else { "batch" });
+    println!("injection: {}", if split { "split" } else { "batch" });
     if args.dry_run {
         println!("--dry-run: no hook installed, nothing intercepted.");
         return;
@@ -178,23 +133,12 @@ fn main() {
     println!("{:-<100}", "");
 
     probe_log::init();
-    unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), 1) };
+    probe_exit::arm(auto_exit_secs);
 
-    let hmod = unsafe { GetModuleHandleW(null_mut()) };
-    let kb_hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hmod, 0) };
-    let ms_hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod, 0) };
-    if kb_hook.is_null() || ms_hook.is_null() {
+    let Some(hooks) = lowlevel::install(Callbacks::new(move |f| on_fire(dummy, split, f))) else {
         eprintln!("SetWindowsHookExW failed");
         return;
-    }
-
-    if auto_exit_secs > 0 {
-        let tid = MAIN_TID.load(Ordering::Relaxed);
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(auto_exit_secs));
-            unsafe { PostThreadMessageW(tid, WM_QUIT, 0, 0) };
-        });
-    }
+    };
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
@@ -204,10 +148,7 @@ fn main() {
         }
     }
 
-    unsafe {
-        UnhookWindowsHookEx(kb_hook);
-        UnhookWindowsHookEx(ms_hook);
-    }
+    lowlevel::uninstall(&hooks);
     inject::release_stuck_keys();
     probe_log::shutdown();
     println!("Stopped (modifiers released).");

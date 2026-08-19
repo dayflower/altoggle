@@ -53,7 +53,8 @@ malformed arguments rather than ignoring them**. Flags and rationale: DEVELOP.md
 The callback must return within `LowLevelHooksTimeout` (300ms by default) or
 Windows drops the hook silently, with no notification and no way to query it.
 
-Inside `keyboard_proc` / `mouse_proc`:
+Inside `keyboard_proc` / `mouse_proc` (`lowlevel.rs`, one copy for the app and
+both probes) and inside the `Callbacks` each binary hands them:
 
 - **No `SendMessage`, no COM, no file or console I/O.** `crate::log` only pushes
   to a channel; the log thread does the writing
@@ -67,9 +68,11 @@ Events we injected ourselves are filtered out by `inject::INJECT_TAG` in
 `dwExtraInfo` before they reach the state machine. Removing that check loops
 forever: our injected Alt up fires the machine, which injects another.
 
-The state machine lives in a `thread_local` in `hook.rs` because low-level hook
-callbacks and out-of-context WinEvent callbacks all run on the thread that
-installed the hook.
+The state machine lives in a `thread_local` in `lowlevel.rs` because low-level
+hook callbacks and out-of-context WinEvent callbacks all run on the thread that
+installed the hook. `hook.rs` keeps the message loop that feeds it: the
+configuration, the reinstall, and the foreground WinEvent are the app's alone,
+which is why the hooks are shared with the probes and the loop is not.
 
 ## Running this on the machine you are developing on
 
@@ -178,7 +181,7 @@ Sections of [notes/DEVELOP.md](notes/DEVELOP.md):
 |------------------|------|
 | `dialog.rs`, `settings.rs` | [The settings dialog](notes/DEVELOP.md#the-settings-dialog) |
 | `tray.rs`, `icons.rs`, `ime.rs`, `design/` | [The tray icon](notes/DEVELOP.md#the-tray-icon) |
-| `hook.rs`, `inject.rs`, `keys.rs` | [Facts established by measurement](notes/DEVELOP.md#facts-established-by-measurement) |
+| `hook.rs`, `lowlevel.rs`, `inject.rs`, `keys.rs` | [Facts established by measurement](notes/DEVELOP.md#facts-established-by-measurement) |
 | `build.rs`, `app.rc` | [Build resources](notes/DEVELOP.md#build-resources) |
 | `bin/*.rs`, `probe_args.rs` | [The probes](notes/DEVELOP.md#the-probes) |
 | `settings::render`, `config.toml` | [The config file](notes/DEVELOP.md#the-config-file) |
