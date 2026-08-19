@@ -9,6 +9,7 @@ pub mod inject;
 pub mod keys;
 pub mod log;
 pub mod probe_args;
+pub mod registry;
 pub mod session;
 pub mod settings;
 pub mod single_instance;
