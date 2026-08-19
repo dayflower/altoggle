@@ -162,7 +162,21 @@ pub fn release_stuck_keys() -> u32 {
     send(&batch)
 }
 
-/// The keys `release_stuck_keys` lets go of.
+/// The keys `release_stuck_keys` lets go of. An injecting concept: keys an
+/// injection can strand down, and whose up is safe to send unasked.
+///
+/// The same eight keys as `keys::foreign_modifier_held`'s `MODIFIERS`, in the
+/// same order so that the two read against each other — but **for a different
+/// reason, and deliberately not shared**. That list holds the keys that can be
+/// found already down; this one holds the keys we can leave down ourselves.
+///
+/// They come apart the moment either reason applies alone. A `DummyThenUp`
+/// trigger that is no modifier belongs here and must stay out of that list; a
+/// `Swallow` modifier belongs there and must stay out of here. `VK_APPS` is the
+/// near case of the first, and its absence from both lists is not a coincidence.
+///
+/// The order is the release order on an abnormal exit, so the default trigger,
+/// Alt, goes first.
 ///
 /// **Must cover every `Suppression::DummyThenUp` trigger**, held there by a test.
 /// Those keys have their real up blocked and a replacement injected, so a partly
