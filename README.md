@@ -1,5 +1,7 @@
 # altoggle
 
+[![CI](https://github.com/dayflower/altoggle/actions/workflows/ci.yml/badge.svg)](https://github.com/dayflower/altoggle/actions/workflows/ci.yml)
+
 Switch the Windows IME with a **solo press of a modifier key**.
 
 - Press and release **right Alt** on its own → IME **on**

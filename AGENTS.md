@@ -105,6 +105,10 @@ cargo run -p altoggle-icongen # by hand, only after changing design/
 cargo fmt                     # clean on this tree; keep it that way
 ```
 
+CI runs the first, second, third and fifth of those on `windows-latest`, in
+that order and with `-D warnings` on clippy, so a clean local run is the same
+check. It never runs `altoggle` itself.
+
 `cargo` may be missing from an already-open shell's PATH even though the
 persisted user PATH is correct: the shell predates the rustup install. Prepend
 `$env:USERPROFILE\.cargo\bin` or open a new terminal.
@@ -186,4 +190,5 @@ Sections of [notes/DEVELOP.md](notes/DEVELOP.md):
 | `bin/*.rs`, `probe_args.rs` | [The probes](notes/DEVELOP.md#the-probes) |
 | `settings::render`, `config.toml` | [The config file](notes/DEVELOP.md#the-config-file) |
 | the version, `README.md`, `scripts/` | [Releasing](notes/DEVELOP.md#releasing) |
+| `.github/workflows/` | [Continuous integration](notes/DEVELOP.md#continuous-integration) |
 | what is still undecided | [Where things are heading](notes/DEVELOP.md#where-things-are-heading) |

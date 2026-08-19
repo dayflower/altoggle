@@ -297,11 +297,46 @@ not mention the probes. It carries the paragraph explaining why SmartScreen warn
 network, two writes, unelevated). Those claims are load-bearing: if any of them
 stops being true, that paragraph changes with it.
 
-Not built, and listed here so each stays a decision rather than an oversight: CI,
-a signing certificate, an installer, and arm64. The largest gap the current state
+Not built, and listed here so each stays a decision rather than an oversight: a
+signing certificate, an installer, and arm64. Releasing itself is not automated
+either; CI checks the tree, not the tag. The largest gap the current state
 leaves is that every diagnostic goes to `OutputDebugStringW` only, so a release
 build that refuses to start does so in complete silence — worth fixing the first
 time a user reports "nothing happens".
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request,
+and it runs exactly the four commands in the AGENTS.md command block — fmt,
+clippy, test, release build — as four steps of one job, with `-D warnings`
+added to clippy because otherwise it reports and still exits zero. One job
+because compiling the dependency tree is most of the wall clock on a Windows
+runner, and this way it happens once; that order because it fails
+cheapest-first.
+
+`windows-latest`, and no matrix. `crates/app` pulls `windows-sys`
+unconditionally and its `build.rs` needs `rc.exe` from the Windows SDK, so an
+ubuntu runner could only ever build `crates/core` — which `cargo test` reaches
+anyway. If the job goes red for what looks like an environment reason rather
+than a code one, the SDK's resource compiler is the thing to suspect, because
+`build.rs` is the only place that wants it.
+
+The toolchain is `stable` and deliberately unpinned: this checks the code
+against the compiler people actually have. `rust-version = "1.85"` is a separate
+claim, and still an untested one.
+
+**A green run means the code compiles, lints and passes its unit tests, and says
+nothing about behaviour on a keyboard.** Nothing in a hosted runner can install
+a low-level hook against real input or read a real IME, so everything in [Facts
+established by measurement](#facts-established-by-measurement) stays outside
+CI's reach — as does the whole reason the probes exist. The app itself is never
+launched there, and should not be: it blocks real Alt up events.
+
+Considered and left out, each a decision rather than an oversight: release and
+tag automation (`scripts/release.ps1` stays a hand-run step, and signing the
+result is unsolved anyway), an MSRV job, a `cargo check -p altoggle-icongen`
+that would drag an SVG toolchain into CI for a crate no build touches, and a
+second job running `crates/core` on ubuntu to prove it is OS independent.
 
 ## Where things are heading
 

@@ -10,8 +10,9 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# The floor that edition 2024 and resolver 3 impose. Nothing verifies it — there
-# is no CI — so treat it as the honest minimum rather than a tested one.
+# The floor that edition 2024 and resolver 3 impose. CI builds on stable and
+# checks nothing below it, so treat it as the honest minimum rather than a
+# tested one.
 rust-version = "1.85"
 authors = ["dayflower"]
 description = "Switches the Windows IME from a solo press of a modifier key"
