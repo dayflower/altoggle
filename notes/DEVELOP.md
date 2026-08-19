@@ -28,6 +28,17 @@ to confirm which build you are about to arm.
 The probes are kept because they isolate one layer each. When something breaks,
 they tell you *which* layer.
 
+What they do **not** isolate is our own wiring. Both hooks, the callback behind
+them, and the state machine dispatch come from `lowlevel.rs` and `dispatch.rs`,
+shared with the app; each probe supplies only its `Callbacks` — for `altprobe`
+the suppression and nothing else, which is why nothing in its `on_fire` may
+touch `ime`. Sharing a copy of the wiring would have proved less, not more: what
+a probe answers is a question about Windows, and every layer it shares with the
+app is a layer it is genuinely testing. Each keeps its own message loop, because
+`hook.rs` pumps messages (config, reinstall, the foreground WinEvent) the probes
+have no equivalent of. Their two escape hatches — Ctrl+C and `--secs` — are
+`probe_exit::arm`.
+
 ## The settings dialog
 
 `crates/app/src/dialog.rs`, raw Win32, no dialog template and no GUI crate.

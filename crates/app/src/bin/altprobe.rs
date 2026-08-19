@@ -25,111 +25,55 @@
 //!            [--dry-run]
 //!   e.g. altprobe --left=LeftWin --right=RightWin
 
-use std::cell::RefCell;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicU32, Ordering};
 
-use altoggle_app::dispatch::{dispatch, is_button_down, now_ms, start_clock};
+use altoggle_app::dispatch::start_clock;
 use altoggle_app::inject;
+use altoggle_app::lowlevel::{self, Callbacks, Fire};
 use altoggle_app::probe_args::ALTPROBE;
-use altoggle_app::probe_log;
-use altoggle_core::{Action, Config, Event, Machine};
+use altoggle_app::{probe_exit, probe_log};
 
-use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_UP, MSG,
-    PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_QUIT,
+    DispatchMessageW, GetMessageW, MSG, TranslateMessage,
 };
 
-static MAIN_TID: AtomicU32 = AtomicU32::new(0);
-/// The dummy key injected for option A. Swappable by argument for measurement.
-static DUMMY_VK: AtomicU32 = AtomicU32::new(0x07);
-
-thread_local! {
-    /// A low-level hook callback runs on the thread that installed the hook
-    /// (that is, the message loop thread). Both the keyboard and mouse hooks are
-    /// installed on the same thread, so thread-local state is enough.
-    static MACHINE: RefCell<Machine> = RefCell::new(Machine::new(Config::default()));
-}
-
-// ---------------------------------------------------------------- hooks
-
-unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code != HC_ACTION as i32 {
-        return unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) };
-    }
-    let k = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-
-    // Our own injections bypass the state machine. Forgetting this loops forever.
-    if k.dwExtraInfo == inject::INJECT_TAG {
-        return unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) };
-    }
-
-    let vk = k.vkCode as u16;
-    let is_up = k.flags & LLKHF_UP != 0;
-    let t = now_ms();
-
-    let (action, contaminated_by_prior) = MACHINE.with_borrow_mut(|m| dispatch(m, vk, is_up, t));
-    if contaminated_by_prior {
+/// What a completed solo press does here: the suppression, and nothing else.
+///
+/// **Nothing in here may touch `ime`.** Leaving the IME alone is the reason
+/// altprobe exists: it isolates the question of whether the suppression works
+/// from the question of whether switching the IME works.
+fn on_fire(dummy: u16, f: Fire) {
+    let Fire {
+        side,
+        trigger_vk: vk,
+        at,
+    } = f;
+    let batch = inject::suppress(dummy, vk);
+    let (sent, expected) = inject::send_batch(&batch);
+    let what = match inject::suppression_for(vk) {
+        inject::Suppression::DummyThenUp => format!(
+            "injected [0x{dummy:02X} down, 0x{dummy:02X} up, 0x{vk:02X} up] \
+             (SendInput={sent}/{expected})"
+        ),
+        // Nothing goes out: the up is the side effect, so replaying it would
+        // perform exactly what the suppression is for.
+        inject::Suppression::Swallow => "injected nothing (swallowed)".to_string(),
+    };
+    probe_log::line(format!(
+        "{:>8.3}  *** FIRE {side:?}  blocked the real up -> {what}",
+        at as f64 / 1000.0,
+    ));
+    if sent != expected {
+        // A failed injection leaves the trigger held down. Release it
+        // defensively: a stuck Win key turns every later keystroke into a
+        // hotkey.
         probe_log::line(format!(
-            "{:>8.3}  a modifier was already held -> contaminated",
-            t as f64 / 1000.0
+            "{:>8.3}  !!! injection failed, releasing modifiers",
+            at as f64 / 1000.0
         ));
+        inject::release_stuck_keys();
     }
-
-    if let Action::Fire(side) = action {
-        // Fire only follows a KeyUp of the held trigger, so `vk` is that trigger.
-        let dummy = DUMMY_VK.load(Ordering::Relaxed) as u16;
-        let batch = inject::suppress(dummy, vk);
-        let (sent, expected) = inject::send_batch(&batch);
-        let what = match inject::suppression_for(vk) {
-            inject::Suppression::DummyThenUp => format!(
-                "injected [0x{dummy:02X} down, 0x{dummy:02X} up, 0x{vk:02X} up] \
-                 (SendInput={sent}/{expected})"
-            ),
-            // Nothing goes out: the up is the side effect, so replaying it would
-            // perform exactly what the suppression is for.
-            inject::Suppression::Swallow => "injected nothing (swallowed)".to_string(),
-        };
-        probe_log::line(format!(
-            "{:>8.3}  *** FIRE {side:?}  blocked the real up -> {what}",
-            t as f64 / 1000.0,
-        ));
-        if sent != expected {
-            // A failed injection leaves the trigger held down. Release it
-            // defensively: a stuck Win key turns every later keystroke into a
-            // hotkey.
-            probe_log::line(format!(
-                "{:>8.3}  !!! injection failed, releasing modifiers",
-                t as f64 / 1000.0
-            ));
-            inject::release_stuck_keys();
-        }
-        return 1; // block the real up
-    }
-
-    unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
 }
-
-unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 && is_button_down(wparam) {
-        MACHINE.with_borrow_mut(|m| m.on_event(Event::MouseButton, now_ms()));
-    }
-    unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
-}
-
-unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
-    // Letting the default termination run could leave a blocked Alt stuck down.
-    // Post WM_QUIT so we go through the normal path (unhook + release modifiers).
-    unsafe { PostThreadMessageW(MAIN_TID.load(Ordering::Relaxed), WM_QUIT, 0, 0) };
-    1
-}
-
-// ---------------------------------------------------------------- main
 
 fn main() {
     let args = match ALTPROBE.parse() {
@@ -140,11 +84,10 @@ fn main() {
         }
     };
     let auto_exit_secs = args.secs;
-    DUMMY_VK.store(args.dummy_vk as u32, Ordering::Relaxed);
-    MACHINE.with_borrow_mut(|m| m.set_config(args.config()));
+    let dummy = args.dummy_vk;
 
     start_clock();
-    MAIN_TID.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+    lowlevel::set_config(args.config());
 
     // Do not let a panic leave keys stuck down.
     let prev = std::panic::take_hook();
@@ -168,23 +111,18 @@ fn main() {
     println!("{:-<100}", "");
 
     probe_log::init();
-    unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), 1) };
+    probe_exit::arm(auto_exit_secs);
 
-    let hmod = unsafe { GetModuleHandleW(null_mut()) };
-    let kb_hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hmod, 0) };
-    let ms_hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod, 0) };
-    if kb_hook.is_null() || ms_hook.is_null() {
+    let callbacks = Callbacks::new(move |f| on_fire(dummy, f)).reporting_contamination(|at| {
+        probe_log::line(format!(
+            "{:>8.3}  a modifier was already held -> contaminated",
+            at as f64 / 1000.0
+        ))
+    });
+    let Some(hooks) = lowlevel::install(callbacks) else {
         eprintln!("SetWindowsHookExW failed");
         return;
-    }
-
-    if auto_exit_secs > 0 {
-        let tid = MAIN_TID.load(Ordering::Relaxed);
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(auto_exit_secs));
-            unsafe { PostThreadMessageW(tid, WM_QUIT, 0, 0) };
-        });
-    }
+    };
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
@@ -194,10 +132,7 @@ fn main() {
         }
     }
 
-    unsafe {
-        UnhookWindowsHookEx(kb_hook);
-        UnhookWindowsHookEx(ms_hook);
-    }
+    lowlevel::uninstall(&hooks);
     inject::release_stuck_keys();
     probe_log::shutdown();
     println!("Stopped (modifiers released).");

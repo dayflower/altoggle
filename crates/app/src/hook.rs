@@ -7,10 +7,15 @@
 //! `LowLevelHooksTimeout` (300ms by default) makes Windows drop the hook without
 //! telling anyone.
 //!
+//! The keyboard and mouse hooks themselves are [`crate::lowlevel`], shared with
+//! the probes. What stays here is everything the probes have no use for: the
+//! message loop, the configuration that arrives through it, reinstalling, and
+//! the foreground WinEvent.
+//!
 //! Rules for the callback:
 //! - No `SendMessage`, no COM, no file or console I/O. `crate::log` only queues
-//! - Our own injected events are filtered out by the `dwExtraInfo` tag before
-//!   they reach the state machine, or they would loop forever
+//! - No `Machine::set_config`. Config changes arrive as a posted message and are
+//!   applied by the loop below
 //!
 //! Other threads talk to this one with `PostThreadMessage`; the message loop
 //! applies the change. That keeps configuration updates out of the callback.
@@ -20,20 +25,19 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::channel;
 use std::thread::JoinHandle;
 
-use altoggle_core::{Action, Config, Event, Machine, Side};
+use altoggle_core::Side;
 
-use crate::dispatch::{dispatch, is_button_down, now_ms, start_clock};
+use crate::dispatch::start_clock;
+use crate::lowlevel::{Callbacks, Fire};
 use crate::settings::Runtime;
-use crate::{ime, inject, log};
+use crate::{ime, inject, log, lowlevel};
 
-use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::Foundation::WPARAM;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetMessageW, HC_ACTION, HHOOK,
-    KBDLLHOOKSTRUCT, LLKHF_UP, MSG, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_QUIT,
+    DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetMessageW, MSG, PostThreadMessageW,
+    TranslateMessage, WINEVENT_OUTOFCONTEXT, WM_APP, WM_QUIT,
 };
 
 /// Replace the running configuration.
@@ -48,21 +52,18 @@ const WM_APP_REINSTALL: u32 = WM_APP + 2;
 static HOOK_TID: AtomicU32 = AtomicU32::new(0);
 /// The key injected to make a solo press stop looking solo.
 ///
-/// Atomic rather than thread-local: the callback reads it, and it is a plain
-/// value with no invariant tying it to the state machine.
+/// Atomic rather than thread-local: the callback reads it, the message loop
+/// writes it, and it is a plain value with no invariant tying it to the state
+/// machine.
 static DUMMY_VK: AtomicU32 = AtomicU32::new(0x07);
 
 thread_local! {
-    /// A low-level hook callback runs on the thread that installed the hook, and
-    /// so does an out-of-context WinEvent callback. Everything that touches this
-    /// is therefore on one thread, and thread-local state is enough.
-    static MACHINE: RefCell<Machine> = RefCell::new(Machine::new(Config::default()));
+    /// Owned by the hook thread, like everything else the callbacks reach.
     static HOOKS: RefCell<Option<Hooks>> = const { RefCell::new(None) };
 }
 
 struct Hooks {
-    keyboard: HHOOK,
-    mouse: HHOOK,
+    input: lowlevel::Hooks,
     foreground: HWINEVENTHOOK,
 }
 
@@ -93,49 +94,21 @@ fn fire(side: Side, trigger_vk: u16) -> (u32, u32) {
     inject::send_batch(&batch)
 }
 
-unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code != HC_ACTION as i32 {
-        return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+/// What a completed solo press does in the app. Runs inside the hook callback,
+/// which is why it only queues its logging.
+fn on_fire(f: Fire) {
+    let side = f.side;
+    let (sent, expected) = fire(side, f.trigger_vk);
+    if sent == expected {
+        log::line(format!("fire {side:?}"));
+    } else {
+        // A partial injection can leave the trigger held down, which for a
+        // modifier turns every following keystroke into a chord.
+        log::line(format!(
+            "fire {side:?} FAILED (SendInput={sent}/{expected}), releasing modifiers"
+        ));
+        inject::release_stuck_keys();
     }
-    let k = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-
-    // Our own injections bypass the state machine entirely. Without this the
-    // injected Alt up would fire the machine again and loop forever.
-    if k.dwExtraInfo == inject::INJECT_TAG {
-        return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
-    }
-
-    let vk = k.vkCode as u16;
-    let is_up = k.flags & LLKHF_UP != 0;
-    let t = now_ms();
-
-    let (action, _) = MACHINE.with_borrow_mut(|m| dispatch(m, vk, is_up, t));
-
-    if let Action::Fire(side) = action {
-        // Fire only follows a KeyUp of the held trigger, so `vk` is that trigger.
-        let (sent, expected) = fire(side, vk);
-        if sent == expected {
-            log::line(format!("fire {side:?}"));
-        } else {
-            // A partial injection can leave the trigger held down, which for a
-            // modifier turns every following keystroke into a chord.
-            log::line(format!(
-                "fire {side:?} FAILED (SendInput={sent}/{expected}), releasing modifiers"
-            ));
-            inject::release_stuck_keys();
-        }
-        // Swallow the real up. Whatever had to replace it went out above.
-        return 1;
-    }
-
-    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
-}
-
-unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 && is_button_down(wparam) {
-        MACHINE.with_borrow_mut(|m| m.on_event(Event::MouseButton, now_ms()));
-    }
-    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
 
 /// Foreground changed, so any half-finished press belongs to a window that is no
@@ -150,16 +123,14 @@ unsafe extern "system" fn foreground_proc(
     _time: u32,
 ) {
     if event == EVENT_SYSTEM_FOREGROUND {
-        MACHINE.with_borrow_mut(|m| m.on_event(Event::Reset, now_ms()));
+        lowlevel::reset();
     }
 }
 
 // ---------------------------------------------------------------- install
 
 fn install() -> Option<Hooks> {
-    let hmod = unsafe { GetModuleHandleW(std::ptr::null()) };
-    let keyboard = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hmod, 0) };
-    let mouse = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod, 0) };
+    let input = lowlevel::install(Callbacks::new(on_fire))?;
     // Out-of-context means the callback is delivered on this thread through the
     // message loop, so it can touch the thread-local state machine.
     let foreground = unsafe {
@@ -173,32 +144,13 @@ fn install() -> Option<Hooks> {
             WINEVENT_OUTOFCONTEXT,
         )
     };
-    if keyboard.is_null() || mouse.is_null() {
-        if !keyboard.is_null() {
-            unsafe { UnhookWindowsHookEx(keyboard) };
-        }
-        if !mouse.is_null() {
-            unsafe { UnhookWindowsHookEx(mouse) };
-        }
-        if !foreground.is_null() {
-            unsafe { UnhookWinEvent(foreground) };
-        }
-        return None;
-    }
-    Some(Hooks {
-        keyboard,
-        mouse,
-        foreground,
-    })
+    Some(Hooks { input, foreground })
 }
 
 fn uninstall(h: &Hooks) {
-    unsafe {
-        UnhookWindowsHookEx(h.keyboard);
-        UnhookWindowsHookEx(h.mouse);
-        if !h.foreground.is_null() {
-            UnhookWinEvent(h.foreground);
-        }
+    lowlevel::uninstall(&h.input);
+    if !h.foreground.is_null() {
+        unsafe { UnhookWinEvent(h.foreground) };
     }
 }
 
@@ -222,7 +174,7 @@ fn reinstall() {
         }
     });
     // The old hooks saw a press we will never see the release of.
-    MACHINE.with_borrow_mut(|m| m.on_event(Event::Reset, now_ms()));
+    lowlevel::reset();
 }
 
 // ---------------------------------------------------------------- thread
@@ -234,7 +186,7 @@ pub struct HookThread {
 /// Apply a runtime config. Only ever called from the hook thread.
 fn apply(rt: Runtime) {
     DUMMY_VK.store(rt.dummy_vk as u32, Ordering::Relaxed);
-    MACHINE.with_borrow_mut(|m| m.set_config(rt.core));
+    lowlevel::set_config(rt.core);
 }
 
 /// Start the hook thread and wait until the hooks are actually installed.
