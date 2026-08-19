@@ -27,8 +27,8 @@
 // test in crates/app/src/lib.rs asserts the two agree, so a forgotten bump
 // fails `cargo test` rather than shipping quietly.
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION 0,2,0,0
+PRODUCTVERSION 0,2,0,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -41,12 +41,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "dayflower"
             VALUE "FileDescription", "Switches the IME from a solo press of a modifier key"
-            VALUE "FileVersion", "0.1.0"
+            VALUE "FileVersion", "0.2.0"
             VALUE "InternalName", "altoggle"
             VALUE "LegalCopyright", "Copyright (c) 2026 dayflower. MIT licensed."
             VALUE "OriginalFilename", "altoggle.exe"
             VALUE "ProductName", "altoggle"
-            VALUE "ProductVersion", "0.1.0"
+            VALUE "ProductVersion", "0.2.0"
         END
     END
     BLOCK "VarFileInfo"
