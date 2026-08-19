@@ -173,11 +173,16 @@ mod trigger_slot {
 }
 
 impl Default for Settings {
+    /// What a user who has never opened the dialog gets.
+    ///
+    /// The triggers are the app's policy and are named here. The threshold is
+    /// not: it is a property of solo-press detection, so it comes from
+    /// `Config::default()` rather than being a second copy of the measured 400.
     fn default() -> Self {
         Self {
             left_trigger: Some(TriggerKey::LeftAlt),
             right_trigger: Some(TriggerKey::RightAlt),
-            threshold_ms: 400,
+            threshold_ms: Config::default().threshold_ms,
             dummy_vk: 0x07,
             show_ime_state: false,
         }

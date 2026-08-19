@@ -6,11 +6,9 @@
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
-    MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, SendInput, VK_APPS, VK_LCONTROL, VK_LSHIFT, VK_LWIN,
-    VK_RCONTROL, VK_RSHIFT, VK_RWIN,
+    MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, SendInput, VK_APPS, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
+    VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
 };
-
-use altoggle_core::{VK_LMENU, VK_RMENU};
 
 /// Marker for events we injected ourselves.
 pub const INJECT_TAG: usize = 0xA170_66E1;
