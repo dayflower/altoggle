@@ -72,4 +72,4 @@ $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
 try { $archive.Entries | ForEach-Object { Write-Host "  $($_.FullName)" } }
 finally { $archive.Dispose() }
 Write-Host ''
-Write-Host "Next: tag v$version, then attach the zip and the SHA256 to a GitHub release."
+Write-Host "This is what CI packages too. To release, run scripts\bump.ps1 and merge the PR."
