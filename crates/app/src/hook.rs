@@ -16,15 +16,13 @@
 //! applies the change. That keeps configuration updates out of the callback.
 
 use std::cell::RefCell;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::channel;
 use std::thread::JoinHandle;
-use std::time::Instant;
 
 use altoggle_core::{Action, Config, Event, Machine, Side};
 
-use crate::keys::foreign_modifier_held;
+use crate::dispatch::{dispatch, is_button_down, now_ms, start_clock};
 use crate::settings::Runtime;
 use crate::{ime, inject, log};
 
@@ -35,8 +33,7 @@ use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, Unho
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetMessageW, HC_ACTION, HHOOK,
     KBDLLHOOKSTRUCT, LLKHF_UP, MSG, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_APP,
-    WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_QUIT, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_QUIT,
 };
 
 /// Replace the running configuration.
@@ -49,7 +46,6 @@ const WM_APP_SET_CONFIG: u32 = WM_APP + 1;
 const WM_APP_REINSTALL: u32 = WM_APP + 2;
 
 static HOOK_TID: AtomicU32 = AtomicU32::new(0);
-static START: OnceLock<Instant> = OnceLock::new();
 /// The key injected to make a solo press stop looking solo.
 ///
 /// Atomic rather than thread-local: the callback reads it, and it is a plain
@@ -68,13 +64,6 @@ struct Hooks {
     keyboard: HHOOK,
     mouse: HHOOK,
     foreground: HWINEVENTHOOK,
-}
-
-fn now_ms() -> u64 {
-    START
-        .get()
-        .map(|s| s.elapsed().as_millis() as u64)
-        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------- callbacks
@@ -120,18 +109,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     let is_up = k.flags & LLKHF_UP != 0;
     let t = now_ms();
 
-    let action = MACHINE.with_borrow_mut(|m| {
-        if is_up {
-            m.on_event(Event::KeyUp(vk), t)
-        } else {
-            let a = m.on_event(Event::KeyDown(vk), t);
-            let cfg = *m.config();
-            if (vk == cfg.left_trigger || vk == cfg.right_trigger) && foreign_modifier_held(vk) {
-                m.on_event(Event::ForeignKeyHeld, t);
-            }
-            a
-        }
-    });
+    let (action, _) = MACHINE.with_borrow_mut(|m| dispatch(m, vk, is_up, t));
 
     if let Action::Fire(side) = action {
         // Fire only follows a KeyUp of the held trigger, so `vk` is that trigger.
@@ -154,13 +132,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32
-        && matches!(
-            wparam as u32,
-            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
-        )
-    {
-        // Alt+drag and Alt+click are not solo presses.
+    if code == HC_ACTION as i32 && is_button_down(wparam) {
         MACHINE.with_borrow_mut(|m| m.on_event(Event::MouseButton, now_ms()));
     }
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
@@ -267,7 +239,7 @@ fn apply(rt: Runtime) {
 
 /// Start the hook thread and wait until the hooks are actually installed.
 pub fn spawn(rt: Runtime) -> Result<HookThread, String> {
-    START.get_or_init(Instant::now);
+    start_clock();
     let (ready_tx, ready_rx) = channel::<Result<u32, String>>();
 
     let join = std::thread::Builder::new()
