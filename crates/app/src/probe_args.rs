@@ -13,6 +13,31 @@ use altoggle_core::Config;
 use crate::inject;
 use crate::settings::{Settings, TriggerKey};
 
+/// Which probe is parsing, and so which flags it accepts.
+///
+/// The two probes do not take the same flags, and that difference used to be
+/// written down nowhere: `--split` was accepted by the shared parser but read by
+/// `imeprobe` alone, so `altprobe --split` was taken and then ignored — the exact
+/// accident the "rejected, never ignored" rule above exists to prevent.
+pub struct Probe {
+    pub name: &'static str,
+    /// Seconds before the probe quits on its own when `--secs` is absent.
+    pub default_secs: u64,
+    pub supports_split: bool,
+}
+
+pub const ALTPROBE: Probe = Probe {
+    name: "altprobe",
+    default_secs: 90,
+    supports_split: false,
+};
+
+pub const IMEPROBE: Probe = Probe {
+    name: "imeprobe",
+    default_secs: 120,
+    supports_split: true,
+};
+
 pub struct ProbeArgs {
     /// Seconds before quitting on our own. 0 disables it.
     pub secs: u64,
@@ -23,32 +48,37 @@ pub struct ProbeArgs {
     /// Solo press of this key means "on".
     pub right: TriggerKey,
     /// Send the suppression and the IME keys as two `SendInput` calls.
-    /// Read by `imeprobe` only.
+    /// Accepted only by a probe whose `Probe::supports_split` is set.
     pub split: bool,
     pub threshold_ms: u64,
     /// Print the header and exit without installing any hook.
     pub dry_run: bool,
 }
 
-/// Printed on a parse error, so the caller does not have to keep its own copy in
-/// sync with what is actually accepted.
-pub fn usage(bin: &str) -> String {
-    let names: Vec<&str> = TriggerKey::ALL.iter().map(|k| k.name()).collect();
-    format!(
-        "usage: {bin} [--secs=N] [--dummy=HEX] [--left=KEY] [--right=KEY] \
-         [--threshold=MS] [--dry-run]{split}\n  \
-         KEY: {keys}\n  \
-         --dry-run: print the settings and exit, installing no hook",
-        split = if bin == "imeprobe" { " [--split]" } else { "" },
-        keys = names.join(", "),
-    )
-}
+impl Probe {
+    /// Printed on a parse error, so the caller does not have to keep its own
+    /// copy in sync with what is actually accepted.
+    pub fn usage(&self) -> String {
+        let names: Vec<&str> = TriggerKey::ALL.iter().map(|k| k.name()).collect();
+        format!(
+            "usage: {bin} [--secs=N] [--dummy=HEX] [--left=KEY] [--right=KEY] \
+             [--threshold=MS] [--dry-run]{split}\n  \
+             KEY: {keys}\n  \
+             --dry-run: print the settings and exit, installing no hook",
+            bin = self.name,
+            split = if self.supports_split {
+                " [--split]"
+            } else {
+                ""
+            },
+            keys = names.join(", "),
+        )
+    }
 
-impl ProbeArgs {
-    pub fn parse(default_secs: u64) -> Result<Self, String> {
+    pub fn parse(&self) -> Result<ProbeArgs, String> {
         let defaults = Config::default();
-        let mut args = Self {
-            secs: default_secs,
+        let mut args = ProbeArgs {
+            secs: self.default_secs,
             dummy_vk: 0x07,
             left: TriggerKey::LeftAlt,
             right: TriggerKey::RightAlt,
@@ -76,7 +106,10 @@ impl ProbeArgs {
                 }
                 "--left" => args.left = parse_trigger(&need(value)?)?,
                 "--right" => args.right = parse_trigger(&need(value)?)?,
-                "--split" => args.split = true,
+                // A probe that never reads it falls through to the unknown
+                // argument arm below, and that is the honest answer: to that
+                // probe this is a flag it has never heard of.
+                "--split" if self.supports_split => args.split = true,
                 "--dry-run" => args.dry_run = true,
                 other => return Err(format!("unknown argument {other}")),
             }
@@ -91,7 +124,9 @@ impl ProbeArgs {
         }
         Ok(args)
     }
+}
 
+impl ProbeArgs {
     /// The probes always watch both sides, so neither slot is ever empty here.
     fn settings(&self) -> Settings {
         Settings {
@@ -172,9 +207,20 @@ mod tests {
 
     #[test]
     fn the_usage_line_lists_every_trigger() {
-        let text = usage("altprobe");
+        let text = ALTPROBE.usage();
         for key in TriggerKey::ALL {
             assert!(text.contains(key.name()), "{} missing", key.name());
         }
+    }
+
+    #[test]
+    fn the_usage_line_hides_split_from_the_probe_that_never_reads_it() {
+        // `altprobe` rejects it too, so advertising it would be a lie.
+        assert!(!ALTPROBE.usage().contains("--split"));
+    }
+
+    #[test]
+    fn the_usage_line_offers_split_on_the_probe_that_reads_it() {
+        assert!(IMEPROBE.usage().contains("--split"));
     }
 }

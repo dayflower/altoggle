@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use altoggle_app::ime;
 use altoggle_app::inject::{self, key_input};
 use altoggle_app::keys::foreign_modifier_held;
-use altoggle_app::probe_args::{self, ProbeArgs};
+use altoggle_app::probe_args::IMEPROBE;
 use altoggle_core::{Action, Config, Event, Machine, Side};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -172,10 +172,10 @@ unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
 }
 
 fn main() {
-    let args = match ProbeArgs::parse(120) {
+    let args = match IMEPROBE.parse() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("imeprobe: {e}\n{}", probe_args::usage("imeprobe"));
+            eprintln!("{}: {e}\n{}", IMEPROBE.name, IMEPROBE.usage());
             std::process::exit(2);
         }
     };

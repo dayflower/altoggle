@@ -11,6 +11,12 @@ digest of the measured facts. This file holds the rest, in full.
 
 `altprobe` and `imeprobe` share a command line (`crates/app/src/probe_args.rs`):
 `--left` / `--right` / `--dummy` / `--threshold` / `--secs` / `--dry-run`.
+**`--split` is `imeprobe` only** — it picks how the injection is batched, which
+`altprobe` has no code for, so `altprobe --split` is refused rather than accepted
+and ignored. Which probe accepts what is spelled out in the `Probe` descriptor
+(`ALTPROBE` / `IMEPROBE`), which also carries the name each prints and its default
+`--secs`; the usage line is generated from it, so it cannot advertise a flag the
+parser would reject.
 **Malformed arguments are rejected, never ignored.** An earlier positional parser
 silently discarded every flag it did not understand, which cost a full afternoon
 of measurement: the probe was watching Alt while the log was being read as
