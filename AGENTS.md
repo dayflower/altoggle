@@ -99,10 +99,8 @@ cargo test                    # 51 tests: 22 in core, 21 in settings, the rest i
 cargo clippy --all-targets    # expected to be clean
 cargo build --release         # the only build that reflects the real deployment
 cargo run -p altoggle-icongen # by hand, only after changing design/
+cargo fmt                     # clean on this tree; keep it that way
 ```
-
-`cargo fmt` is **not** clean on this tree and running it would rewrite files
-nobody touched. Format new files individually with `rustfmt` instead.
 
 `cargo` may be missing from an already-open shell's PATH even though the
 persisted user PATH is correct: the shell predates the rustup install. Prepend

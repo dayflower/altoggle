@@ -25,8 +25,8 @@ use windows_sys::Win32::System::RemoteDesktop::{
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, HWND_MESSAGE,
-    KillTimer, MSG, PostThreadMessageW, RegisterClassW, SetTimer, TranslateMessage, WNDCLASSW,
-    WM_DESTROY, WM_QUIT, WM_TIMER,
+    KillTimer, MSG, PostThreadMessageW, RegisterClassW, SetTimer, TranslateMessage, WM_DESTROY,
+    WM_QUIT, WM_TIMER, WNDCLASSW,
 };
 
 use crate::{dialog, hook, log, wide};
