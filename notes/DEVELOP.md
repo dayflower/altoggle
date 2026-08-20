@@ -284,8 +284,10 @@ their manifests ask for: a versioned zip named for its target triple, a bare
 3. `.github/workflows/release.yml` notices the version change on `main`, runs
    the tests, calls `scripts/release.ps1`, publishes `v<version>` with both
    assets and their SHA256s in the notes, and then opens the winget pull request
-4. Nothing for Scoop. Its Excavator polls this repository's releases every four
-   hours and updates the manifest itself
+4. Nothing for Scoop either. The workflow's last job kicks the bucket's
+   Excavator so the manifest follows within a minute; skipped or failed, the
+   Excavator's own four-hourly poll of this repository's releases picks the
+   release up anyway
 
 **The version number is typed once.** It used to have three homes — the root
 `Cargo.toml`, `crates/app/app.rc`, and the tag — and only the first two were
@@ -367,8 +369,26 @@ is part of why both exist.
 **zip** rather than the bare exe: Scoop extracts archives, so the README and
 LICENSE ride along. `checkver` and `autoupdate` let the template's Excavator
 workflow find each new release and rewrite the version, URL and hash on its own,
-so nothing here pushes to it. The GitHub topic `scoop-bucket` is what gets a
-bucket into the Scoop Directory; the repository name is not read by anything.
+so nothing here writes a manifest. The GitHub topic `scoop-bucket` is what gets
+a bucket into the Scoop Directory; the repository name is not read by anything.
+
+**The `scoop` job in `release.yml` only shortens the wait.** The Excavator polls
+every four hours; the job dispatches it the moment the release exists. The
+bucket needed nothing added for that — `workflow_dispatch:` is already in its
+`excavator.yml` — but two things here are set up by hand once:
+
+- the **GitHub App installed on `dayflower/scoop-bucket`** with *Actions: read
+  and write*. `GITHUB_TOKEN` cannot reach another repository, and the App is
+  already how this account crosses that line elsewhere
+- **`ACTIONS_APP_ID`**, a repository *variable*, and
+  **`ACTIONS_APP_PRIVATE_KEY`**, a secret — named as in the other repositories
+  that use the App. The variable is what the job's guard tests, for the same
+  reason the winget job tests an env: `if:` can read `vars` and not `secrets`
+
+Until both exist the job is skipped rather than failed, and a failure costs
+nothing beyond the wait it was meant to save: the release is already published,
+and the next poll updates the manifest regardless. The same nudge by hand is
+`gh workflow run excavator.yml -R dayflower/scoop-bucket`.
 
 `persist` is deliberately absent. The settings live in
 `%APPDATA%\altoggle\config.toml`, outside the app directory, which also means
