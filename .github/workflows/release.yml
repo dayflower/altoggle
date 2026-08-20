@@ -24,8 +24,10 @@
 # The winget manifest is updated from here rather than from a workflow of its
 # own, and that is forced rather than chosen: the release below is created with
 # GITHUB_TOKEN, and a release created with GITHUB_TOKEN does not start another
-# workflow. `on: release` would sit there and never fire. The Scoop bucket needs
-# nothing from this file -- its Excavator polls the releases and updates itself.
+# workflow. `on: release` would sit there and never fire. The Scoop bucket runs
+# the other way round -- its Excavator polls this repository's releases and
+# rewrites its own manifest -- and the last job here only nudges it into doing
+# that now rather than within four hours.
 #
 # What this does not do, each a decision rather than an oversight: code signing
 # (there is no certificate, so SmartScreen still warns), an installer, arm64,
@@ -239,3 +241,50 @@ jobs:
           release-tag: ${{ needs.release.outputs.tag }}
           installers-regex: '^altoggle\.exe$'
           token: ${{ env.TOKEN }}
+
+  # Nudges the bucket's Excavator, which otherwise finds the release on its next
+  # four-hourly poll. Nothing had to be added on the bucket's side: its
+  # excavator.yml already carries `workflow_dispatch:`.
+  #
+  # The polling stays the thing that guarantees the update, and this job is
+  # deliberately built so that it cannot cost anything when it fails. It is
+  # last, nothing depends on it, and the release is already published by the
+  # time it runs -- so an expired key or an uninstalled App delays the manifest
+  # by at most one poll rather than losing it.
+  #
+  # GITHUB_TOKEN cannot reach another repository, so the token is minted from
+  # the GitHub App: `owner` and `repositories` scope it to scoop-bucket alone,
+  # and the App must be installed there with Actions: read and write. Two
+  # settings back it, both named as in the other repositories that use the App
+  # -- the ACTIONS_APP_ID variable and the ACTIONS_APP_PRIVATE_KEY secret.
+  # Without them the steps are skipped rather than failed, as with WINGET_TOKEN
+  # above; `vars` is readable from `if:` where `secrets` is not, which is why
+  # the variable is what the guard tests.
+  scoop:
+    name: kick the Scoop bucket
+    needs: release
+    if: needs.release.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    # Nothing here uses GITHUB_TOKEN; the App token is the only credential.
+    permissions: {}
+    env:
+      APP_ID: ${{ vars.ACTIONS_APP_ID }}
+
+    steps:
+      - name: mint a token for the bucket
+        id: token
+        if: env.APP_ID != ''
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          app-id: ${{ vars.ACTIONS_APP_ID }}
+          private-key: ${{ secrets.ACTIONS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: scoop-bucket
+
+      # No --ref: gh runs the workflow from the bucket's default branch, so the
+      # branch name is not written down a second time here to disagree with it.
+      - name: dispatch the Excavator
+        if: steps.token.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: gh workflow run excavator.yml -R ${{ github.repository_owner }}/scoop-bucket
