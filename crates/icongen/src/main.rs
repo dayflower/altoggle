@@ -131,9 +131,9 @@ fn write_app_icon(source: &Path, target: &Path) {
 
 /// Shrink to a square of `size`, halving repeatedly first.
 ///
-/// The master is 1254px and the smallest entry is 16px. Resampling that in one
+/// The master is 512px and the smallest entry is 16px. Resampling that in one
 /// step aliases badly whatever the filter: each output pixel would be decided by
-/// a handful of the ~6000 source pixels it covers. Halving averages the whole
+/// a handful of the ~1000 source pixels it covers. Halving averages the whole
 /// area down first, and only the last step, which is never more than 2:1, needs
 /// a good filter.
 fn downscale(master: &Pixmap, size: u32) -> Pixmap {
