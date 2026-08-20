@@ -47,16 +47,26 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      # stable, deliberately not pinned: this checks the code against the
-      # compiler people actually have. The rust-version floor in Cargo.toml is a
-      # separate claim, and one nothing here tests.
-      - uses: dtolnay/rust-toolchain@stable
+      # Two claims that used to be one, and pinact.yml is what separated them.
+      # The *toolchain* is stable and deliberately not fixed to a version: this
+      # checks the code against the compiler people actually have, and the
+      # rust-version floor in Cargo.toml is a separate claim that nothing here
+      # tests. The *action* is pinned to a SHA like every other one.
+      #
+      # Which is why the toolchain moved into an input. `@stable` was a branch
+      # this action force-pushes on every Rust release, so pinning that branch's
+      # tip buys a reference GitHub eventually collects and a workflow that
+      # fails one day for no reason anyone changed. The SHA below is on master,
+      # which is the form the action's README supports -- and there the
+      # toolchain has to be said out loud, because the ref no longer says it.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Ordered cheapest-failure first: formatting before compilation, clippy
       # before the release build.

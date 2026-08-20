@@ -68,7 +68,7 @@ jobs:
     steps:
       # Two commits, because the guard compares this Cargo.toml with the one
       # before it.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 2
 
@@ -112,12 +112,16 @@ jobs:
           # runner exits the step with whatever it holds at the end.
           exit 0
 
-      # stable and unpinned, as in ci.yml: this is the compiler people actually
-      # have. No components, because fmt and clippy ran on the pull request.
-      - uses: dtolnay/rust-toolchain@stable
+      # stable, as in ci.yml: this is the compiler people actually have. The
+      # action itself is pinned, and the reasoning for both -- including why the
+      # toolchain is an input rather than the ref -- is written out there. No
+      # components, because fmt and clippy ran on the pull request.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         if: steps.decide.outputs.release == 'true'
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: steps.decide.outputs.release == 'true'
 
       # Not a repeat of the pull request's run: what gets built here is the
@@ -234,7 +238,7 @@ jobs:
       # than take the action's default.
       - name: open the manifest pull request
         if: env.TOKEN != ''
-        uses: vedantmgoyal9/winget-releaser@v2
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
         with:
           identifier: dayflower.altoggle
           version: ${{ needs.release.outputs.version }}

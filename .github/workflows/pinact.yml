@@ -1,0 +1,68 @@
+# Pins every action reference under .github/workflows to a commit SHA, and
+# keeps them pinned.
+#
+# A tag is not an identity. `actions/checkout@v5` is a ref its owner can move at
+# any time, so what runs here is whatever they last pushed to it -- and
+# release.yml runs with `contents: write` and hands ACTIONS_APP_PRIVATE_KEY to a
+# step. One moved tag upstream is one leaked App key here. That is not
+# hypothetical: tj-actions/changed-files was taken over exactly this way in
+# March 2025, and every workflow trusting the tag started printing its own
+# secrets into its logs.
+#
+# The pinned form is `owner/repo@<40 hex> # <tag>`. The SHA is what runs; the
+# comment is for humans and for whatever bumps it later, and is not read by
+# Actions.
+#
+# `on: pull_request` and nothing else. Checking main would be too late: by then
+# the unpinned reference has already run.
+#
+# The action fixes what it finds and pushes the fix to the pull request branch,
+# which is why it wants the GitHub App rather than GITHUB_TOKEN -- a commit
+# pushed with GITHUB_TOKEN starts no further workflow, so ci.yml would never
+# re-run on the corrected tree. `persist-credentials: false` keeps checkout's
+# token out of the working tree, leaving the App token as the only thing that
+# can push.
+#
+# Two things this needs that no file can set up: the App installed on *this*
+# repository (release.yml's scoop job only needs it on scoop-bucket), with
+# Contents: read and write **and Workflows: read and write**. Without the second
+# one the push is refused with a 403, because the files being rewritten live
+# under .github/workflows.
+#
+# Unlike the App-backed job in release.yml this one carries no
+# `if: vars.ACTIONS_APP_ID != ''` guard, and the difference is deliberate. There
+# the App only shortens a wait, so a skip costs nothing. Here a skip means the
+# check quietly stops checking, which is the same as not having it. Let it go
+# red instead.
+#
+# Fork pull requests cannot be fixed this way -- the branch lives in the fork
+# and the App is not installed there. Nothing to solve yet: every branch here is
+# in this repository.
+
+name: pinact
+
+on:
+  pull_request:
+
+concurrency:
+  group: pinact-${{ github.ref }}
+  cancel-in-progress: true
+
+# The App token does the pushing; GITHUB_TOKEN only has to read the tree.
+permissions:
+  contents: read
+
+jobs:
+  pinact:
+    name: pin actions to commit SHAs
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: suzuki-shunsuke/pinact-action@896d595f299e71d65b9d28349d6956abe144390a # v3.0.0
+        with:
+          app_id: ${{ vars.ACTIONS_APP_ID }}
+          app_private_key: ${{ secrets.ACTIONS_APP_PRIVATE_KEY }}
