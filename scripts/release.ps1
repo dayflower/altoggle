@@ -9,9 +9,17 @@
 # Deliberately ASCII-only: Windows PowerShell 5.1 reads a BOM-less script as
 # ANSI, and a stray non-ASCII character would arrive mangled.
 #
-# Output: dist\altoggle-v<version>-x86_64-pc-windows-msvc.zip, and its SHA256 —
-# which is what a winget or scoop manifest asks for, so it is printed rather
-# than left to be computed later.
+# Two things come out of dist\, because the two package managers want
+# different shapes of the same binary:
+#
+#   altoggle-v<version>-x86_64-pc-windows-msvc.zip   humans, and the Scoop
+#                                                    manifest, which extracts it
+#   altoggle.exe                                     the winget manifest, which
+#                                                    is InstallerType: portable
+#
+# It is one build either way; the exe in the zip and the exe beside it are the
+# same file. Both SHA256s are printed because a manifest asks for one and the
+# release notes publish both.
 
 $ErrorActionPreference = 'Stop'
 
@@ -52,21 +60,31 @@ Copy-Item $exe $stage
 Copy-Item (Join-Path $root 'README.md') $stage
 Copy-Item (Join-Path $root 'LICENSE') $stage
 
-# The name is the shape of the download URL a winget or scoop manifest will
-# point at, so it carries the version and the target triple.
+# The name the Scoop manifest points at, so it carries the version and the
+# target triple. Scoop autoupdate rebuilds it for each new version, which is
+# why the shape matters more than the prettiness.
 $zip = Join-Path $dist "altoggle-v$version-x86_64-pc-windows-msvc.zip"
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
 Remove-Item $stage -Recurse -Force
 
-$hash = (Get-FileHash $zip -Algorithm SHA256).Hash
-$size = [math]::Round((Get-Item $zip).Length / 1KB)
+# The bare exe, beside the zip rather than inside it. A winget portable package
+# downloads exactly one file and links it onto PATH, with nowhere to unpack an
+# archive to; pointing winget at the zip instead would mean NestedInstallerType
+# and buy nothing. Unversioned on purpose: the download URL already carries the
+# tag, and this name is the one winget leaves on disk.
+$exeAsset = Join-Path $dist 'altoggle.exe'
+Copy-Item $exe $exeAsset
 
 Write-Host ''
-Write-Host "  $zip"
-Write-Host "  $size KB"
-Write-Host "  SHA256 $hash"
-Write-Host ''
-Write-Host "Contents:"
+foreach ($asset in @($zip, $exeAsset)) {
+    $hash = (Get-FileHash $asset -Algorithm SHA256).Hash
+    $size = [math]::Round((Get-Item $asset).Length / 1KB)
+    Write-Host "  $asset"
+    Write-Host "  $size KB"
+    Write-Host "  SHA256 $hash"
+    Write-Host ''
+}
+Write-Host "Contents of the zip:"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
 try { $archive.Entries | ForEach-Object { Write-Host "  $($_.FullName)" } }

@@ -166,9 +166,11 @@ The full log — every measurement, with what was tried and rejected — is in
   `VERSIONINFO` block beside the icon is one
 - **`[profile.release]` must not set `panic = "abort"`**, for the reason above:
   the unwinding is what releases the modifiers
-- **Only `altoggle.exe` is ever distributed.** `cargo build --release` also
-  produces `keylog`, `altprobe` and `imeprobe`; `scripts/release.ps1` builds and
-  packages the one binary so that rule is executable rather than remembered
+- **Only `altoggle.exe` is ever distributed**, in two shapes of one build: the
+  zip Scoop extracts, and the bare exe the winget portable manifest points at.
+  `cargo build --release` also produces `keylog`, `altprobe` and `imeprobe`;
+  `scripts/release.ps1` builds and packages the one binary so that rule is
+  executable rather than remembered
 
 ## Conventions
 
