@@ -39,6 +39,23 @@ rather than broken.
 
 ## Install
 
+Any of three ways. The first two also keep it up to date.
+
+**winget**
+
+```
+winget install dayflower.altoggle
+```
+
+**Scoop**
+
+```
+scoop bucket add dayflower https://github.com/dayflower/scoop-bucket
+scoop install dayflower/altoggle
+```
+
+**By hand**
+
 1. Download the zip from the [releases page][releases] and check the SHA256 if
    you like — it is published with each release.
 2. **Unblock it.** Windows marks anything downloaded from the internet, and
@@ -46,13 +63,24 @@ rather than broken.
    *Properties* → tick *Unblock* → *OK*, **before** extracting.
 3. Put `altoggle.exe` somewhere permanent — `%LOCALAPPDATA%\Programs\altoggle\`
    is a reasonable home. There is no installer; the exe is the whole app.
-4. Run it. A tray icon appears.
-5. To have it come back after a reboot, tick **Start with Windows** on the tray
+
+Step 2 is the one the package managers spare you: they fetch the file
+themselves, so nothing arrives marked.
+
+Then, however you installed it:
+
+1. Run it. A tray icon appears. winget and Scoop both put `altoggle` on your
+   PATH, and Scoop adds a start-menu entry.
+2. To have it come back after a reboot, tick **Start with Windows** on the tray
    menu.
 
 Autostart records the **path the exe has right now**. If you move or rename
 `altoggle.exe` afterwards, Windows will keep launching the old path; untick
 *Start with Windows* and tick it again to repoint it.
+
+**Quit altoggle from the tray before updating it.** A running instance holds the
+executable open, and neither `winget upgrade` nor `scoop update` can replace a
+file that is in use.
 
 ## Why Windows warns about it
 
@@ -121,10 +149,14 @@ would turn every later keystroke into a chord.
 
 1. Untick **Start with Windows** on the tray menu.
 2. **Quit**.
-3. Delete `altoggle.exe` and the `%APPDATA%\altoggle\` folder.
+3. Remove the app: `winget uninstall dayflower.altoggle`, `scoop uninstall
+   altoggle`, or delete `altoggle.exe` if you put it there yourself.
+4. Delete the `%APPDATA%\altoggle\` folder.
 
-That is everything. There is no installer state, no service, and nothing else in
-the registry.
+Steps 1 and 4 are yours whichever way you installed it. The *Run* entry and the
+config file are written by the app while it runs, and an uninstaller knows
+nothing about them. Beyond those two, that is everything: no installer state, no
+service, and nothing else in the registry.
 
 ## Build from source
 

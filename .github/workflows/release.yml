@@ -21,10 +21,15 @@
 # a tray app would be an antivirus incident and a trust problem in one. A second
 # copy of that allowlist here is exactly the thing that would rot.
 #
+# The winget manifest is updated from here rather than from a workflow of its
+# own, and that is forced rather than chosen: the release below is created with
+# GITHUB_TOKEN, and a release created with GITHUB_TOKEN does not start another
+# workflow. `on: release` would sit there and never fire. The Scoop bucket needs
+# nothing from this file -- its Excavator polls the releases and updates itself.
+#
 # What this does not do, each a decision rather than an oversight: code signing
 # (there is no certificate, so SmartScreen still warns), an installer, arm64,
-# pre-release versions (app.rc's FILEVERSION cannot express one), and updating
-# any winget or scoop manifest.
+# and pre-release versions (app.rc's FILEVERSION cannot express one).
 
 name: Release
 
@@ -52,6 +57,12 @@ jobs:
     name: build and publish
     runs-on: windows-latest
 
+    # For the winget job below, which cannot see another job's step outputs.
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      tag: ${{ steps.decide.outputs.tag }}
+      version: ${{ steps.decide.outputs.version }}
+
     steps:
       # Two commits, because the guard compares this Cargo.toml with the one
       # before it.
@@ -76,6 +87,8 @@ jobs:
               Select-Object -First 1).Matches[0].Groups[1].Value
 
           "tag=v$version" >> $env:GITHUB_OUTPUT
+          # winget wants the version without the v; the tag wants it with one.
+          "version=$version" >> $env:GITHUB_OUTPUT
 
           if ($version -eq $before) {
               Write-Host "Cargo.toml changed but the version did not ($version); nothing to release."
@@ -113,48 +126,68 @@ jobs:
         if: steps.decide.outputs.release == 'true'
         run: cargo test
 
-      # Builds --bin altoggle alone and stages altoggle.exe, README.md and
-      # LICENSE into dist\. The script's "altoggle is running" guard cannot fire
-      # on a runner.
+      # Builds --bin altoggle alone and leaves two assets in dist\: the zip of
+      # altoggle.exe, README.md and LICENSE, and altoggle.exe on its own for the
+      # winget portable manifest. The script's "altoggle is running" guard
+      # cannot fire on a runner.
       - name: package
         if: steps.decide.outputs.release == 'true'
         run: .\scripts\release.ps1
 
-      # The script prints the same hash, but its stdout is a human's report and
-      # not an interface. Read the file instead.
-      - name: hash the archive
-        id: archive
+      # The script prints the same hashes, but its stdout is a human's report
+      # and not an interface. Read the files instead.
+      - name: hash the assets
+        id: assets
         if: steps.decide.outputs.release == 'true'
         run: |
           $zip = Get-ChildItem dist\*.zip
           if (@($zip).Count -ne 1) {
               throw "expected exactly one archive in dist\, found $(@($zip).Count)"
           }
-          "path=$($zip.FullName)" >> $env:GITHUB_OUTPUT
-          "name=$($zip.Name)" >> $env:GITHUB_OUTPUT
-          "sha256=$((Get-FileHash $zip.FullName -Algorithm SHA256).Hash)" >> $env:GITHUB_OUTPUT
+          $exe = Join-Path (Get-Location) 'dist\altoggle.exe'
+          if (-not (Test-Path $exe)) {
+              throw "release.ps1 left no $exe for the winget manifest to point at"
+          }
+          "zip-path=$($zip.FullName)" >> $env:GITHUB_OUTPUT
+          "zip-name=$($zip.Name)" >> $env:GITHUB_OUTPUT
+          "zip-sha256=$((Get-FileHash $zip.FullName -Algorithm SHA256).Hash)" >> $env:GITHUB_OUTPUT
+          "exe-path=$exe" >> $env:GITHUB_OUTPUT
+          "exe-sha256=$((Get-FileHash $exe -Algorithm SHA256).Hash)" >> $env:GITHUB_OUTPUT
 
       # --generate-notes writes the commit and pull request list; --notes-file
-      # puts this in front of it. The SHA256 is here because README.md promises
-      # it is published with each release, and the unblock line because a zip
-      # downloaded from the internet stays marked until someone ticks the box.
+      # puts this in front of it. Both SHA256s are here because README.md
+      # promises they are published with each release, and the unblock line
+      # because a zip downloaded from the internet stays marked until someone
+      # ticks the box -- which is the one thing the package managers spare you.
       - name: publish
         if: steps.decide.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.decide.outputs.tag }}
-          ASSET_PATH: ${{ steps.archive.outputs.path }}
-          ASSET_NAME: ${{ steps.archive.outputs.name }}
-          ASSET_SHA256: ${{ steps.archive.outputs.sha256 }}
+          ZIP_PATH: ${{ steps.assets.outputs.zip-path }}
+          ZIP_NAME: ${{ steps.assets.outputs.zip-name }}
+          ZIP_SHA256: ${{ steps.assets.outputs.zip-sha256 }}
+          EXE_PATH: ${{ steps.assets.outputs.exe-path }}
+          EXE_SHA256: ${{ steps.assets.outputs.exe-sha256 }}
         run: |
           $notes = @"
-          Download ``$($env:ASSET_NAME)`` below, then **unblock the zip before
-          extracting it** -- right-click -> Properties -> tick Unblock -> OK.
-          Windows marks anything downloaded from the internet, and left marked
-          the executable is treated as untrusted.
+          ``````
+          winget install dayflower.altoggle
+          ``````
+          ``````
+          scoop bucket add dayflower https://github.com/dayflower/scoop-bucket
+          scoop install dayflower/altoggle
+          ``````
+
+          Or take ``$($env:ZIP_NAME)`` below and **unblock it before extracting**
+          -- right-click -> Properties -> tick Unblock -> OK. Windows marks
+          anything downloaded from the internet, and left marked the executable
+          is treated as untrusted. ``altoggle.exe`` beside it is the same binary
+          without the wrapper, and is what the winget manifest points at.
 
           ``````
-          SHA256  $($env:ASSET_SHA256)
+          SHA256  $($env:ZIP_SHA256)  $($env:ZIP_NAME)
+          SHA256  $($env:EXE_SHA256)  altoggle.exe
           ``````
 
           altoggle is not code-signed, so SmartScreen warns on first launch.
@@ -162,8 +195,47 @@ jobs:
           "@
           $notes | Out-File notes.md -Encoding utf8
 
-          gh release create "$env:TAG" "$env:ASSET_PATH" `
+          gh release create "$env:TAG" "$env:ZIP_PATH" "$env:EXE_PATH" `
             --target "$env:GITHUB_SHA" `
             --title "$env:TAG" `
             --generate-notes `
             --notes-file notes.md
+
+  # Opens the pull request against microsoft/winget-pkgs that updates
+  # dayflower.altoggle to the version just published. Three things it needs, and
+  # all three are set up by hand once:
+  #
+  #   - a fork of microsoft/winget-pkgs under dayflower; the action pushes its
+  #     branch there and cannot work any other way
+  #   - WINGET_TOKEN, a *classic* PAT with the public_repo scope. Fine-grained
+  #     tokens are not supported by the action
+  #   - one version of dayflower.altoggle already in winget-pkgs. The action
+  #     updates an existing package; the first manifest is submitted by hand
+  #     with komac or wingetcreate
+  #
+  # Set WINGET_TOKEN only after that first manifest is merged. Until it exists
+  # the step below is skipped rather than failed, which is what the env guard
+  # buys: `if:` at job level cannot read secrets, only env can.
+  #
+  # A failure here does not undo anything -- the release is already published,
+  # and the same pull request can be opened from a laptop with `komac update`.
+  winget:
+    name: submit to winget-pkgs
+    needs: release
+    if: needs.release.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    env:
+      TOKEN: ${{ secrets.WINGET_TOKEN }}
+
+    steps:
+      # The zip is in the same release, so the regex has to name the exe rather
+      # than take the action's default.
+      - name: open the manifest pull request
+        if: env.TOKEN != ''
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: dayflower.altoggle
+          version: ${{ needs.release.outputs.version }}
+          release-tag: ${{ needs.release.outputs.tag }}
+          installers-regex: '^altoggle\.exe$'
+          token: ${{ env.TOKEN }}

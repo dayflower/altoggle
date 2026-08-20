@@ -270,10 +270,10 @@ going through `DefWindowProc` would be the thing to suspect.
 
 ## Releasing
 
-Portable exe, GitHub Releases, no installer and no code signing. The eventual
-destination is a winget or scoop manifest, which is why the zip is named for its
-version and target triple and why the SHA256 is published with it: those are the
-two things such a manifest asks for.
+Portable exe, GitHub Releases, no installer and no code signing. Two package
+managers carry it — winget and Scoop — and the shape of the release is what
+their manifests ask for: a versioned zip named for its target triple, a bare
+`altoggle.exe` beside it, and both SHA256s in the notes.
 
 1. `.\scripts\bump.ps1 <major|minor|patch|X.Y.Z>` — resolves the next version
    from the current one, writes it to the root `Cargo.toml` and to
@@ -282,8 +282,10 @@ two things such a manifest asks for.
    every change without touching a file or a branch
 2. Merge that pull request
 3. `.github/workflows/release.yml` notices the version change on `main`, runs
-   the tests, calls `scripts/release.ps1`, and publishes `v<version>` with the
-   zip attached and its SHA256 in the notes
+   the tests, calls `scripts/release.ps1`, publishes `v<version>` with both
+   assets and their SHA256s in the notes, and then opens the winget pull request
+4. Nothing for Scoop. Its Excavator polls this repository's releases every four
+   hours and updates the manifest itself
 
 **The version number is typed once.** It used to have three homes — the root
 `Cargo.toml`, `crates/app/app.rc`, and the tag — and only the first two were
@@ -298,9 +300,12 @@ would ship. It is the same script CI calls, so a clean local run is the same
 packaging — that is the point of CI calling it rather than assembling the zip
 itself.
 
-**Only `altoggle.exe` ships.** A `keylog.exe` sitting next to a tray app in a
-downloaded zip is an antivirus incident and a trust problem in one. The script
-exists to make that rule executable; do not hand-assemble a zip instead.
+**Only `altoggle.exe` ships**, in two shapes of the same build. A `keylog.exe`
+sitting next to a tray app in a downloaded zip is an antivirus incident and a
+trust problem in one. The script exists to make that rule executable; do not
+hand-assemble a zip instead. The bare exe is not a second thing to keep in sync
+— it is the same file the zip contains, copied out because a winget portable
+package downloads exactly one file and has nowhere to unpack an archive to.
 
 `crates/app` depends on `altoggle-core` **by path with no `version`**. Nothing is
 published, so a version requirement there would be a third copy of the number —
@@ -319,6 +324,56 @@ numbers and a hyphen is not one of them. The largest gap the current state
 leaves is that every diagnostic goes to `OutputDebugStringW` only, so a release
 build that refuses to start does so in complete silence — worth fixing the first
 time a user reports "nothing happens".
+
+### winget
+
+`dayflower.altoggle`, `InstallerType: portable`, pointed at the bare
+`altoggle.exe`. The `winget` job in `release.yml` runs
+[winget-releaser](https://github.com/vedantmgoyal9/winget-releaser), which opens
+the pull request against `microsoft/winget-pkgs`.
+
+**It is a job in `release.yml` rather than a workflow of its own, and that is
+forced.** The release is created with `GITHUB_TOKEN`, and a release created with
+`GITHUB_TOKEN` does not start another workflow — an `on: release` workflow would
+sit there and never fire. This is the same rule that keeps the tag out of a
+separate workflow, one layer up.
+
+Three things it needs, each set up by hand exactly once:
+
+- a **fork of `microsoft/winget-pkgs` under `dayflower`**. The action pushes its
+  branch there; there is no other route
+- **`WINGET_TOKEN`**, a *classic* PAT with the `public_repo` scope. Fine-grained
+  tokens are not supported by the action
+- **one version already in `winget-pkgs`.** The action updates an existing
+  package, so the first manifest is submitted by hand with `komac new` or
+  `wingetcreate new` against a published release
+
+Set `WINGET_TOKEN` only after that first manifest is merged. Until the secret
+exists the step is skipped rather than failed — that is what the `env.TOKEN`
+guard buys, since a job-level `if:` cannot read secrets and an env can. A
+failure there undoes nothing either: the release is already published, and the
+same pull request can be opened from a laptop with `komac update`.
+
+The one submission risk worth expecting is **`Validation-Defender-Error`**. An
+unsigned binary that installs a low-level keyboard hook is exactly what
+heuristics react to, and winget-pkgs runs Defender over the installer. It is a
+false-positive process, not a policy rejection, and Scoop is unaffected — which
+is part of why both exist.
+
+### Scoop
+
+`dayflower/scoop-bucket`, a general-purpose bucket built from
+`ScoopInstaller/BucketTemplate`, with `bucket/altoggle.json` pointing at the
+**zip** rather than the bare exe: Scoop extracts archives, so the README and
+LICENSE ride along. `checkver` and `autoupdate` let the template's Excavator
+workflow find each new release and rewrite the version, URL and hash on its own,
+so nothing here pushes to it. The GitHub topic `scoop-bucket` is what gets a
+bucket into the Scoop Directory; the repository name is not read by anything.
+
+`persist` is deliberately absent. The settings live in
+`%APPDATA%\altoggle\config.toml`, outside the app directory, which also means
+neither `scoop uninstall` nor `winget uninstall` removes them — nor the `Run`
+entry, which the app writes while running. `README.md`'s uninstall steps say so.
 
 ## Continuous integration
 
@@ -365,18 +420,24 @@ conditions that both have to hold: the version differs from the one at `HEAD^`
 (so an ordinary dependency bump is a no-op, and so adding the workflow does not
 itself release whatever version is current), and no release exists for it yet
 (so a re-run publishes nothing twice). Everything after the guard is skipped by
-`if:` rather than by a second job.
+`if:` rather than by a second job, and the one job that does follow reads the
+same decision through job outputs.
 
 It then runs `cargo test` — not a repeat of the pull request's run, because what
 is built here is the merge commit, and because the drift test is the claim the
 whole scheme rests on — calls `scripts/release.ps1` for the packaging, and hands
-the zip to `gh release create --target <sha>`.
+both assets to `gh release create --target <sha>`.
 
 **The tag is created by that command, not pushed by a step.** It costs a
 lightweight tag rather than an annotated one, and buys back the failure mode
 where a pushed tag survives a failed publish. It also sidesteps the rule that a
 tag pushed with `GITHUB_TOKEN` starts no further workflow: there is no further
 workflow, because this one runs to the published release.
+
+That same rule is why the winget submission is a **second job here** rather than
+a workflow keyed on `on: release`. A release created with `GITHUB_TOKEN` starts
+nothing either, so such a workflow would sit and never fire. What that job needs
+before it can work is in [Releasing](#releasing).
 
 What it guarantees is that the tag, the version resource in the exe, and
 `Cargo.toml` agree — all three come from one number that `scripts/bump.ps1`
