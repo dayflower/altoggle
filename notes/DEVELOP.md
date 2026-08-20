@@ -397,9 +397,10 @@ entry, which the app writes while running. `README.md`'s uninstall steps say so.
 
 ## Continuous integration
 
-Two workflows. `ci.yml` checks the tree on every pull request; `release.yml`
-publishes when the version on `main` changes. They share a runner image and
-nothing else.
+Three workflows. `ci.yml` checks the tree on every pull request; `release.yml`
+publishes when the version on `main` changes; `pinact.yml` keeps the action
+references in both of those pinned to commit SHAs. The first two share a runner
+image and nothing else, and the third does not even share that.
 
 ### ci.yml
 
@@ -417,9 +418,18 @@ anyway. If the job goes red for what looks like an environment reason rather
 than a code one, the SDK's resource compiler is the thing to suspect, because
 `build.rs` is the only place that wants it.
 
-The toolchain is `stable` and deliberately unpinned: this checks the code
-against the compiler people actually have. `rust-version = "1.85"` is a separate
-claim, and still an untested one.
+The toolchain is `stable` and deliberately not fixed to a version: this checks
+the code against the compiler people actually have. `rust-version = "1.85"` is a
+separate claim, and still an untested one.
+
+**The action that installs it is pinned, and that is a different claim.** It
+used to be `dtolnay/rust-toolchain@stable`, where the ref chose the toolchain;
+it is now a SHA on that action's `master` with `toolchain: stable` passed as an
+input. The reason is not tidiness — `stable` there is a *branch*, force-pushed
+on every Rust release, so a SHA taken from its tip is one GitHub eventually
+collects and a workflow that fails one day for no reason anyone changed. A SHA
+on `master` is the pinned form that action's README supports, and once the ref
+stops naming a toolchain the input has to.
 
 **A green run means the code compiles, lints and passes its unit tests, and says
 nothing about behaviour on a keyboard.** Nothing in a hosted runner can install
@@ -463,6 +473,51 @@ What it guarantees is that the tag, the version resource in the exe, and
 `Cargo.toml` agree — all three come from one number that `scripts/bump.ps1`
 wrote once. What it does not do is sign anything, build an installer, or make
 the exe any less alarming to SmartScreen.
+
+### pinact.yml
+
+Every `uses:` in this repository is `owner/repo@<40 hex> # <tag>`, and this
+workflow is what keeps it that way. It runs
+[pinact](https://github.com/suzuki-shunsuke/pinact) on every pull request,
+rewrites anything that is not a SHA, and pushes the rewrite to the pull request
+branch.
+
+**A tag is not an identity.** `actions/checkout@v5` is a ref its owner can move,
+so what runs is whatever they last pushed to it — and `release.yml` runs with
+`contents: write` and hands `ACTIONS_APP_PRIVATE_KEY` to a step. One moved tag
+upstream is one leaked App key here. `tj-actions/changed-files` was taken over
+exactly this way in March 2025, and every workflow that trusted the tag started
+printing its own secrets into its logs.
+
+The comment after the SHA is for humans and for whatever bumps it later.
+Actions never reads it, and nothing in this repository updates it: there is no
+Dependabot or Renovate here, so pinned means frozen until someone raises it by
+hand. That is the trade, and for five actions it is the cheap side of it.
+
+The App is why the fix is a push rather than a red check. A commit pushed with
+`GITHUB_TOKEN` starts no further workflow, so `ci.yml` would never re-run on the
+corrected tree; the App token has no such rule. Which means two things set up by
+hand, and neither of them lives in a file:
+
+- the **GitHub App installed on `dayflower/altoggle`** — the same App as in
+  [Scoop](#scoop), but that job only needs it on `dayflower/scoop-bucket` — with
+  *Contents: read and write* **and *Workflows: read and write***. Without the
+  second one the push is refused with a 403, because what is being rewritten
+  lives under `.github/workflows`
+- `ACTIONS_APP_ID` and `ACTIONS_APP_PRIVATE_KEY`, which already exist here for
+  `release.yml`
+
+**This job carries no `if: vars.ACTIONS_APP_ID != ''` guard, and that differs
+from the other two App-backed jobs on purpose.** There the App only shortens a
+wait, so a skip costs nothing; here a skip means the check quietly stops
+checking, which is the same as not having it. If the App is not installed this
+goes red, and going red is the correct outcome.
+
+`persist-credentials: false` on the checkout keeps `GITHUB_TOKEN` out of the
+working tree, so the App token is the only credential that can push. Fork pull
+requests cannot be fixed this way at all — the branch is in the fork and the App
+is not installed there — which is not a problem yet, because every branch here
+is in this repository.
 
 ## Where things are heading
 

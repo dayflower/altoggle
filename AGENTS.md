@@ -110,7 +110,9 @@ that order and with `-D warnings` on clippy, so a clean local run is the same
 check. A second workflow publishes a release when the version on `main` changes,
 which is what `scripts/bump.ps1` is for — **never bump the version by hand, and
 never push a tag**; the tag is derived from `Cargo.toml` so that it cannot
-disagree with the binary. Neither workflow ever runs `altoggle` itself.
+disagree with the binary. A third, `pinact.yml`, keeps the action references in
+the other two pinned to commit SHAs and pushes the fix when one drifts. No
+workflow ever runs `altoggle` itself.
 
 `cargo` may be missing from an already-open shell's PATH even though the
 persisted user PATH is correct: the shell predates the rustup install. Prepend
@@ -180,6 +182,8 @@ The full log — every measurement, with what was tried and rejected — is in
   `feat(tray): ...`. The body contains nothing but the `Co-Authored-By` trailer
 - Comments explain why, not what. Measured numbers belong next to the code that
   depends on them
+- **Every `uses:` in a workflow is `owner/repo@<40 hex> # <tag>`**, never a bare
+  tag or branch. `pinact.yml` enforces it on every pull request
 - Line endings are LF, enforced by `.gitattributes`
 
 ## Where to look before you touch it
