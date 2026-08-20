@@ -8,7 +8,7 @@ default-members = ["crates/core", "crates/app"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # The floor that edition 2024 and resolver 3 impose. CI builds on stable and
 # checks nothing below it, so treat it as the honest minimum rather than a
