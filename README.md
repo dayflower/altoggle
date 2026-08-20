@@ -2,6 +2,10 @@
 
 [![CI](https://github.com/dayflower/altoggle/actions/workflows/ci.yml/badge.svg)](https://github.com/dayflower/altoggle/actions/workflows/ci.yml)
 
+<p align="center">
+  <img src="design/appicon.png" alt="" width="160">
+</p>
+
 Switch the Windows IME with a **solo press of a modifier key**.
 
 - Press and release **right Alt** on its own → IME **on**
